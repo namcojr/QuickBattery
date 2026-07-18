@@ -29,7 +29,12 @@ class BatteryRepositoryImpl @Inject constructor(
         val snapshot = dataProvider.getBatterySnapshot()
         val now = System.currentTimeMillis()
         val usagePermissionGranted = dataProvider.hasUsageStatsPermission()
+        // Recent window drives the *current-usage* trend regression (we want the last few hours).
         val recentLevelSamples = dataProvider.getRecentBatteryLevelSamples(RUNTIME_TREND_LOOKBACK_WINDOW_MILLIS)
+        // Wide window drives the *session-average* baseline: the unplug moment can be days back, so
+        // resolving the discharge-start level from the 24h trend window silently loses it on long
+        // sessions (the retained history already keeps up to a week of samples).
+        val sessionLevelSamples = dataProvider.getRecentBatteryLevelSamples(SESSION_BASELINE_LOOKBACK_WINDOW_MILLIS)
 
         val lastDischargingMillis = dataProvider.getLastDischargingTimestampMillis()
         val inferredDischargingStartMillis = inferDischargingStartFromSamples(
@@ -45,7 +50,7 @@ class BatteryRepositoryImpl @Inject constructor(
         val recordSinceLastChargeMillis = dataProvider.updateSinceLastChargeRecord(sinceLastChargeMillis)
 
         val dischargeStartLevelPercent = resolveDischargeStartLevelPercent(
-            samples = recentLevelSamples,
+            samples = sessionLevelSamples,
             dischargeStartMillis = effectiveLastDischargingMillis,
         )
         val consumedPercent = calculateConsumedPercent(snapshot, sinceLastChargeMillis, dischargeStartLevelPercent)
@@ -66,10 +71,21 @@ class BatteryRepositoryImpl @Inject constructor(
         // Always a full 100 -> 0% projection ("if I keep using it like now, a full charge lasts X").
         // Prefer the most current-usage rate available: recent discharge trend, then live current
         // draw, and only fall back to the average since unplugging when neither is available yet.
-        val liveFullRuntimeMillis =
+        val currentUsageFullRuntimeMillis =
             runtimeFromTrend?.fullRuntimeMillis
                 ?: estimateFullRuntimeFromRemaining(snapshot, remainingRuntimeFromCurrentMillis)
-                ?: estimatedFullRuntimeFromHistoryMillis
+
+        // Proven-longevity floor: the whole discharge session is ground truth. If a full charge has
+        // already demonstrably lasted longer than the (noisier, short-window) current-usage rate
+        // projects, the current-usage figure is under-reporting real endurance -- e.g. a light
+        // multi-day session where recent activity is heavier than the session average. Anchor the
+        // projection so it never dips below what the session has actually proven achievable.
+        val liveFullRuntimeMillis = when {
+            currentUsageFullRuntimeMillis != null && estimatedFullRuntimeFromHistoryMillis != null ->
+                maxOf(currentUsageFullRuntimeMillis, estimatedFullRuntimeFromHistoryMillis)
+
+            else -> currentUsageFullRuntimeMillis ?: estimatedFullRuntimeFromHistoryMillis
+        }
 
         // Persist the freshest real projection so it can be reused as a warm start. Passing null
         // while charging (no live estimate) leaves the previously saved samples untouched.
@@ -503,6 +519,9 @@ class BatteryRepositoryImpl @Inject constructor(
     private companion object {
         private const val FALLBACK_USAGE_WINDOW_MILLIS = 24L * 60L * 60L * 1000L
         private const val RUNTIME_TREND_LOOKBACK_WINDOW_MILLIS = 24L * 60L * 60L * 1000L
+        // Covers the full retained battery-level history so the unplug baseline can be resolved for
+        // multi-day discharge sessions (BatteryLevelHistoryStore retains ~7 days).
+        private const val SESSION_BASELINE_LOOKBACK_WINDOW_MILLIS = 7L * 24L * 60L * 60L * 1000L
         private const val MIN_DISCHARGE_CURRENT_MICRO_AMPS = 20_000
         private const val MIN_RUNTIME_ESTIMATE_MILLIS = 60L * 1000L
         private const val MAX_RUNTIME_ESTIMATE_MILLIS = 14L * 24L * 60L * 60L * 1000L

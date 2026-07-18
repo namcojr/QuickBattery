@@ -10,7 +10,12 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -30,11 +35,26 @@ fun BatterySummaryCard(
     levelPercent: Int?,
     remainingRuntimeMillis: Long?,
     estimatedFullRuntimeMillis: Long?,
+    onOpenLifetime: () -> Unit,
 ) {
     val remainingRuntimeLabel = remainingRuntimeMillis?.let(::formatDuration) ?: "Learning..."
     val fullRuntimeLabel = estimatedFullRuntimeMillis?.let(::formatDuration) ?: "Learning..."
 
-    BatteryCard(title = "Battery Summary") {
+    BatteryCard(
+        title = "Battery Summary",
+        headerAction = {
+            IconButton(
+                onClick = onOpenLifetime,
+                modifier = Modifier.size(36.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Info,
+                    contentDescription = "Battery lifetime statistics",
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f),
+                )
+            }
+        },
+    ) {
         Text(
             text = remainingRuntimeLabel,
             style = MaterialTheme.typography.displaySmall,

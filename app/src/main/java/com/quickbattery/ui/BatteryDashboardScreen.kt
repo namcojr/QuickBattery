@@ -39,6 +39,7 @@ fun BatteryDashboardScreen(
     onRefresh: () -> Unit,
     onToggleShowAllApps: () -> Unit,
     onOpenUsageAccessSettings: () -> Unit,
+    onOpenLifetime: () -> Unit,
 ) {
     Scaffold(
         topBar = {
@@ -76,6 +77,7 @@ fun BatteryDashboardScreen(
                     paddingValues = innerPadding,
                     onToggleShowAllApps = onToggleShowAllApps,
                     onOpenUsageAccessSettings = onOpenUsageAccessSettings,
+                    onOpenLifetime = onOpenLifetime,
                 )
             }
         }
@@ -88,6 +90,7 @@ private fun BatteryDashboardContent(
     paddingValues: PaddingValues,
     onToggleShowAllApps: () -> Unit,
     onOpenUsageAccessSettings: () -> Unit,
+    onOpenLifetime: () -> Unit,
 ) {
     val report = uiState.batteryReport
     if (report == null) {
@@ -134,6 +137,7 @@ private fun BatteryDashboardContent(
                 levelPercent = report.levelPercent,
                 remainingRuntimeMillis = report.remainingRuntimeMillis,
                 estimatedFullRuntimeMillis = report.estimatedFullRuntimeMillis,
+                onOpenLifetime = onOpenLifetime,
             )
         }
 
