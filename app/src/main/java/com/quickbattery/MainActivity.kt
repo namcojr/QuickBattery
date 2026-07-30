@@ -18,6 +18,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.quickbattery.ui.BatteryDashboardScreen
 import com.quickbattery.ui.BatteryViewModel
@@ -73,6 +75,12 @@ private fun QuickBatteryApp(
         if (currentScreen == Screen.Lifetime) {
             lifetimeViewModel.onScreenOpened()
         }
+    }
+
+    // Refresh battery data every time the app comes to the foreground so returning
+    // after a period of inactivity shows up-to-date data, just like pressing Refresh.
+    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
+        batteryViewModel.refresh()
     }
 
     Crossfade(
