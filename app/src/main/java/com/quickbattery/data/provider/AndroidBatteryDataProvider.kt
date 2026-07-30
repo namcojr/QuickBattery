@@ -56,6 +56,7 @@ class AndroidBatteryDataProvider @Inject constructor(
         val status = mapBatteryStatus(batteryStatusCode)
         val chargingSource = mapChargingSource(batteryPluggedCode)
         val health = mapBatteryHealth(batteryHealthCode)
+        val healthPercent = getStateOfHealthPercent()
         val voltageMillivolts = getVoltageExtraInMilliVolts(batteryIntent)
         val temperatureCelsius = batteryIntent
             ?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1)
@@ -70,6 +71,7 @@ class AndroidBatteryDataProvider @Inject constructor(
             status = status,
             chargingSource = chargingSource,
             health = health,
+            healthPercent = healthPercent,
             voltageMillivolts = voltageMillivolts,
             temperatureCelsius = temperatureCelsius,
             technology = technology,
@@ -227,9 +229,55 @@ class AndroidBatteryDataProvider @Inject constructor(
     }
 
     private fun getVoltageExtraInMilliVolts(intent: Intent?): Int? {
+        // Prefer the fuel-gauge's live voltage node: EXTRA_VOLTAGE is often quantized to coarse
+        // steps (e.g. 4000/3900 mV) on many OEMs, whereas /sys/.../voltage_now exposes the real
+        // instantaneous reading (e.g. 4133 mV). Fall back to the broadcast extra when the node is
+        // unreadable (SELinux-restricted on some devices).
+        readPreciseVoltageMilliVolts()?.let { return it }
+
         val rawVoltage = intent?.getIntExtra(BatteryManager.EXTRA_VOLTAGE, Int.MIN_VALUE) ?: return null
         return normalizeVoltageToMilliVolts(rawVoltage)
     }
+
+    private fun readPreciseVoltageMilliVolts(): Int? {
+        VOLTAGE_NOW_SYSFS_PATHS.forEach { path ->
+            val rawMicroVolts = runCatching {
+                val file = java.io.File(path)
+                if (!file.canRead()) return@runCatching null
+                file.readText().trim().toIntOrNull()
+            }.getOrNull() ?: return@forEach
+
+            // voltage_now is documented in microvolts; some panels report millivolts directly.
+            val normalized = normalizeVoltageToMilliVolts(rawMicroVolts)
+            if (normalized != null && normalized in PLAUSIBLE_VOLTAGE_MILLI_VOLTS_RANGE) {
+                return normalized
+            }
+        }
+        return null
+    }
+
+    private fun getStateOfHealthPercent(): Int? {
+        // Primary (Android 14+): BatteryManager.BATTERY_PROPERTY_STATE_OF_HEALTH returns the real
+        // state of health as a percentage. The constant isn't in older compile SDKs, so resolve its
+        // id via reflection against the device framework (same approach as the cycle-count property).
+        stateOfHealthBatteryPropertyId?.let { property ->
+            getIntBatteryProperty(property)?.takeIf { it in 1..100 }?.let { return it }
+        }
+
+        // Best-effort fallback: some OEM fuel gauges expose a numeric SOH via sysfs.
+        STATE_OF_HEALTH_SYSFS_PATHS.forEach { path ->
+            val soh = runCatching {
+                val file = java.io.File(path)
+                if (!file.canRead()) return@runCatching null
+                file.readText().trim().toIntOrNull()
+            }.getOrNull()
+            if (soh != null && soh in 1..100) {
+                return soh
+            }
+        }
+        return null
+    }
+
 
     private fun normalizeVoltageToMilliVolts(rawVoltage: Int): Int? {
         if (rawVoltage <= 0) {
@@ -469,6 +517,19 @@ class AndroidBatteryDataProvider @Inject constructor(
         // extra is still read on capable devices when compiling against older SDKs.
         private const val EXTRA_CYCLE_COUNT = "android.os.extra.CYCLE_COUNT"
 
+        // Candidate fuel-gauge nodes exposing the precise instantaneous voltage. Read best-effort;
+        // unreadable on SELinux-restricted devices, in which case we fall back to EXTRA_VOLTAGE.
+        private val VOLTAGE_NOW_SYSFS_PATHS = listOf(
+            "/sys/class/power_supply/battery/voltage_now",
+            "/sys/class/power_supply/bms/voltage_now",
+        )
+
+        // Best-effort numeric state-of-health nodes used only when the framework property is absent.
+        private val STATE_OF_HEALTH_SYSFS_PATHS = listOf(
+            "/sys/class/power_supply/battery/state_of_health",
+            "/sys/class/power_supply/bms/state_of_health",
+        )
+
         private val dischargingUsageEventType: Int? by lazy {
             runCatching {
                 UsageEvents.Event::class.java.getField("DISCHARGING").getInt(null)
@@ -478,6 +539,12 @@ class AndroidBatteryDataProvider @Inject constructor(
         private val cycleCountBatteryPropertyId: Int? by lazy {
             runCatching {
                 BatteryManager::class.java.getField("BATTERY_PROPERTY_CYCLE_COUNT").getInt(null)
+            }.getOrNull()
+        }
+
+        private val stateOfHealthBatteryPropertyId: Int? by lazy {
+            runCatching {
+                BatteryManager::class.java.getField("BATTERY_PROPERTY_STATE_OF_HEALTH").getInt(null)
             }.getOrNull()
         }
     }

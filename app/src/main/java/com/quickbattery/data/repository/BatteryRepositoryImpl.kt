@@ -136,7 +136,7 @@ class BatteryRepositoryImpl @Inject constructor(
             estimatedFullRuntimeMillis = estimatedFullRuntimeMillis,
             sinceLastChargeMillis = sinceLastChargeMillis,
             recordSinceLastChargeMillis = recordSinceLastChargeMillis,
-            batteryHealth = snapshot.health?.toDisplayName(),
+            batteryHealth = formatBatteryHealth(snapshot),
             chargeCycles = snapshot.chargeCycles,
             isCharging = snapshot.status == BatteryStatus.Charging || snapshot.status == BatteryStatus.Full,
             usagePermissionGranted = usagePermissionGranted,
@@ -376,7 +376,7 @@ class BatteryRepositoryImpl @Inject constructor(
         list += BatteryInsight("Charging State", if (snapshot.status.isChargingState()) "Charging" else "Unplugged")
         list += BatteryInsight("Battery Saver", if (snapshot.batterySaverEnabled) "On" else "Off")
 
-        snapshot.health?.let { list += BatteryInsight("Battery Health", it.toDisplayName()) }
+        formatBatteryHealth(snapshot)?.let { list += BatteryInsight("Battery Health", it) }
         snapshot.chargeCycles?.let { list += BatteryInsight("Charge Cycles", it.toString()) }
         snapshot.chargingSource?.let {
             if (it != ChargingSource.Unknown) {
@@ -412,13 +412,24 @@ class BatteryRepositoryImpl @Inject constructor(
         }
         val currentMilliAmps = resolveChargingCurrentMilliAmps(snapshot) ?: return null
 
-        return when {
-            currentMilliAmps >= SUPER_VOOC_ESTIMATE_THRESHOLD_MILLI_AMPS -> "Super VOOC (estimated)"
+        val tier = when {
+            currentMilliAmps >= SUPER_VOOC_ESTIMATE_THRESHOLD_MILLI_AMPS -> "Super VOOC"
             currentMilliAmps >= ULTRA_FAST_THRESHOLD_MILLI_AMPS -> "Ultra Fast"
             currentMilliAmps >= FAST_THRESHOLD_MILLI_AMPS -> "Fast"
             currentMilliAmps >= NORMAL_THRESHOLD_MILLI_AMPS -> "Normal"
             currentMilliAmps > 0f -> "Slow"
-            else -> null
+            else -> return null
+        }
+
+        // Charging power P(W) = V(volts) x I(amps) = (mV / 1000) x (mA / 1000).
+        val watts = snapshot.voltageMillivolts
+            ?.takeIf { it > 0 }
+            ?.let { (it.toFloat() / 1000f) * (currentMilliAmps / 1000f) }
+
+        return if (watts != null) {
+            "$tier - ${"%.1f".format(watts)} W"
+        } else {
+            tier
         }
     }
 
@@ -503,6 +514,26 @@ class BatteryRepositoryImpl @Inject constructor(
         }
     }
 
+    // Prefer the real state-of-health percentage (Android 14+) rendered as "82% - Good"; fall back
+    // to the categorical BATTERY_HEALTH_* status when the device doesn't report a percentage.
+    private fun formatBatteryHealth(snapshot: BatterySnapshot): String? {
+        val percent = snapshot.healthPercent?.takeIf { it in 1..100 }
+        if (percent != null) {
+            return "$percent% - ${healthTierLabel(percent)}"
+        }
+        return snapshot.health?.toDisplayName()?.takeUnless { it == "Unknown" }
+    }
+
+    private fun healthTierLabel(percent: Int): String {
+        return when {
+            percent >= HEALTH_EXCELLENT_THRESHOLD -> "Excellent"
+            percent >= HEALTH_GOOD_THRESHOLD -> "Good"
+            percent >= HEALTH_FAIR_THRESHOLD -> "Fair"
+            percent >= HEALTH_POOR_THRESHOLD -> "Poor"
+            else -> "Replace Soon"
+        }
+    }
+
     private fun formatDuration(durationMillis: Long): String {
         val totalMinutes = durationMillis / 60_000L
         val days = totalMinutes / (24L * 60L)
@@ -533,6 +564,10 @@ class BatteryRepositoryImpl @Inject constructor(
         private const val FAST_THRESHOLD_MILLI_AMPS = 2_500f
         private const val ULTRA_FAST_THRESHOLD_MILLI_AMPS = 4_500f
         private const val SUPER_VOOC_ESTIMATE_THRESHOLD_MILLI_AMPS = 6_000f
+        private const val HEALTH_EXCELLENT_THRESHOLD = 90
+        private const val HEALTH_GOOD_THRESHOLD = 80
+        private const val HEALTH_FAIR_THRESHOLD = 70
+        private const val HEALTH_POOR_THRESHOLD = 50
     }
 
     private data class RuntimeEstimate(

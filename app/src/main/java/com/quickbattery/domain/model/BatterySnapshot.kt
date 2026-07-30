@@ -8,6 +8,7 @@ data class BatterySnapshot(
     val status: BatteryStatus,
     val chargingSource: ChargingSource?,
     val health: BatteryHealth?,
+    val healthPercent: Int?,
     val voltageMillivolts: Int?,
     val temperatureCelsius: Float?,
     val technology: String?,
