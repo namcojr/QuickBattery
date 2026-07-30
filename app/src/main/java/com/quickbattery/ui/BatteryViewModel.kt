@@ -23,10 +23,10 @@ class BatteryViewModel @Inject constructor(
     private val _uiState = MutableStateFlow(BatteryUiState())
     val uiState: StateFlow<BatteryUiState> = _uiState.asStateFlow()
     private var refreshJob: Job? = null
+    private var autoRefreshJob: Job? = null
 
     init {
         refresh()
-        startAutoRefresh()
     }
 
     fun refresh(silent: Boolean = false) {
@@ -68,11 +68,24 @@ class BatteryViewModel @Inject constructor(
     }
 
     private fun startAutoRefresh() {
-        viewModelScope.launch {
+        if (autoRefreshJob?.isActive == true) {
+            return
+        }
+
+        autoRefreshJob = viewModelScope.launch {
             while (isActive) {
                 delay(AUTO_REFRESH_INTERVAL_MILLIS)
                 refresh(silent = true)
             }
+        }
+    }
+
+    fun onForegroundChanged(isInForeground: Boolean) {
+        if (isInForeground) {
+            startAutoRefresh()
+        } else {
+            autoRefreshJob?.cancel()
+            autoRefreshJob = null
         }
     }
 

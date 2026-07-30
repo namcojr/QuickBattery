@@ -79,6 +79,14 @@ private fun QuickBatteryApp(
 
     // Refresh battery data every time the app comes to the foreground so returning
     // after a period of inactivity shows up-to-date data, just like pressing Refresh.
+    LifecycleEventEffect(Lifecycle.Event.ON_START) {
+        batteryViewModel.onForegroundChanged(isInForeground = true)
+    }
+
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
+        batteryViewModel.onForegroundChanged(isInForeground = false)
+    }
+
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
         batteryViewModel.refresh()
     }
