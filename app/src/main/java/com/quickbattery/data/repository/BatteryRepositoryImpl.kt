@@ -15,6 +15,7 @@ import com.quickbattery.domain.repository.BatteryRepository
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.withContext
@@ -421,8 +422,10 @@ class BatteryRepositoryImpl @Inject constructor(
             else -> return null
         }
 
-        // Charging power P(W) = V(volts) x I(amps) = (mV / 1000) x (mA / 1000).
-        val watts = snapshot.voltageMillivolts
+        // Charging power P(W) = V(volts) x I(amps). Use the real PACK voltage: on multi-cell
+        // (series) packs the fuel gauge's voltage_now reports the per-cell voltage (~4 V), while the
+        // pack is N cells in series, so the true charging voltage is N x that.
+        val watts = resolvePackVoltageMillivolts(snapshot)
             ?.takeIf { it > 0 }
             ?.let { (it.toFloat() / 1000f) * (currentMilliAmps / 1000f) }
 
@@ -431,6 +434,30 @@ class BatteryRepositoryImpl @Inject constructor(
         } else {
             tier
         }
+    }
+
+    // Reported voltage_now is per-cell on series (multi-cell) packs; scale it by the inferred number
+    // of series cells to get the actual pack voltage used for charging-power math.
+    private fun resolvePackVoltageMillivolts(snapshot: BatterySnapshot): Int? {
+        val cellVoltageMillivolts = snapshot.voltageMillivolts?.takeIf { it > 0 } ?: return null
+        return cellVoltageMillivolts * inferSeriesCellCount(snapshot)
+    }
+
+    private fun inferSeriesCellCount(snapshot: BatterySnapshot): Int {
+        val cellVoltageMillivolts = snapshot.voltageMillivolts?.takeIf { it > 0 } ?: return 1
+        // Energy(nWh) / Charge(µAh) = nominal pack voltage in mV (Wh/Ah = V). Dividing by the
+        // reported per-cell voltage reveals how many cells are wired in series: ~1 on single-cell
+        // phones, ~2 on dual-cell VOOC/SuperVOOC packs (e.g. OPPO Find X-series) that expose
+        // per-cell voltage_now. Rounding absorbs the instantaneous-vs-nominal voltage gap since
+        // cell counts are integer-spaced. Falls back to a single cell when the energy or charge
+        // counter is unavailable (some OEM ROMs hide them).
+        val energyNanoWattHours = snapshot.energyNanoWattHours?.takeIf { it > 0 } ?: return 1
+        val chargeMicroAmpHours = snapshot.chargeCounterMicroAmpHours?.takeIf { it > 0 } ?: return 1
+
+        val packVoltageMillivolts = energyNanoWattHours.toDouble() / chargeMicroAmpHours.toDouble()
+        return (packVoltageMillivolts / cellVoltageMillivolts.toDouble())
+            .roundToInt()
+            .coerceIn(1, MAX_SERIES_CELL_COUNT)
     }
 
     private fun resolveChargingCurrentMilliAmps(snapshot: BatterySnapshot): Float? {
@@ -564,6 +591,9 @@ class BatteryRepositoryImpl @Inject constructor(
         private const val FAST_THRESHOLD_MILLI_AMPS = 2_500f
         private const val ULTRA_FAST_THRESHOLD_MILLI_AMPS = 4_500f
         private const val SUPER_VOOC_ESTIMATE_THRESHOLD_MILLI_AMPS = 6_000f
+        // Upper bound for inferred series cells; phone packs are 1S or 2S, 4 leaves headroom while
+        // rejecting garbage energy/charge ratios.
+        private const val MAX_SERIES_CELL_COUNT = 4
         private const val HEALTH_EXCELLENT_THRESHOLD = 90
         private const val HEALTH_GOOD_THRESHOLD = 80
         private const val HEALTH_FAIR_THRESHOLD = 70
