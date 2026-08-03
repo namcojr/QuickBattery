@@ -13,14 +13,17 @@ internal object BatterySessionStore {
             .edit()
             .putLong(KEY_DISCHARGING_STARTED_AT_MILLIS, timestampMillis)
             .putString(KEY_LAST_STATUS, BatteryStatus.Discharging.name)
+            .putLong(KEY_LAST_STATUS_UPDATED_AT_MILLIS, timestampMillis)
             .apply()
     }
 
     fun markPowerConnected(context: Context) {
+        val now = System.currentTimeMillis()
         prefs(context)
             .edit()
             .remove(KEY_DISCHARGING_STARTED_AT_MILLIS)
             .putString(KEY_LAST_STATUS, BatteryStatus.Charging.name)
+            .putLong(KEY_LAST_STATUS_UPDATED_AT_MILLIS, now)
             .apply()
     }
 
@@ -30,6 +33,7 @@ internal object BatterySessionStore {
         timestampMillis: Long,
     ) {
         val previousStatus = readLastStatus(context)
+        val previousStatusUpdatedAtMillis = readLastStatusUpdatedAt(context)
 
         when {
             status.isChargingState() -> {
@@ -40,9 +44,13 @@ internal object BatterySessionStore {
                 val editor = prefs(context)
                     .edit()
                     .putString(KEY_LAST_STATUS, status.name)
+                    .putLong(KEY_LAST_STATUS_UPDATED_AT_MILLIS, timestampMillis)
 
                 // Only trust snapshot timestamps when a charging -> discharging transition is observed.
-                if (previousStatus?.isChargingState() == true) {
+                val previousStatusIsFresh = previousStatusUpdatedAtMillis != null &&
+                    (timestampMillis - previousStatusUpdatedAtMillis) in
+                    0L..SNAPSHOT_TRANSITION_MAX_STALENESS_MILLIS
+                if (previousStatus?.isChargingState() == true && previousStatusIsFresh) {
                     editor.putLong(KEY_DISCHARGING_STARTED_AT_MILLIS, timestampMillis)
                 }
 
@@ -53,6 +61,7 @@ internal object BatterySessionStore {
                 prefs(context)
                     .edit()
                     .putString(KEY_LAST_STATUS, status.name)
+                    .putLong(KEY_LAST_STATUS_UPDATED_AT_MILLIS, timestampMillis)
                     .apply()
             }
         }
@@ -66,6 +75,11 @@ internal object BatterySessionStore {
     private fun readLastStatus(context: Context): BatteryStatus? {
         val rawStatus = prefs(context).getString(KEY_LAST_STATUS, null) ?: return null
         return runCatching { BatteryStatus.valueOf(rawStatus) }.getOrNull()
+    }
+
+    private fun readLastStatusUpdatedAt(context: Context): Long? {
+        val value = prefs(context).getLong(KEY_LAST_STATUS_UPDATED_AT_MILLIS, -1L)
+        return value.takeIf { it > 0L }
     }
 
     private fun prefs(context: Context) =
@@ -82,4 +96,6 @@ internal object BatterySessionStore {
     private const val PREFERENCES_NAME = "battery_session_store"
     private const val KEY_DISCHARGING_STARTED_AT_MILLIS = "discharging_started_at_millis"
     private const val KEY_LAST_STATUS = "last_status"
+    private const val KEY_LAST_STATUS_UPDATED_AT_MILLIS = "last_status_updated_at_millis"
+    private const val SNAPSHOT_TRANSITION_MAX_STALENESS_MILLIS = 15L * 60L * 1000L
 }

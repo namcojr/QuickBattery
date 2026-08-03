@@ -112,7 +112,11 @@ class AndroidBatteryDataProvider @Inject constructor(
         val localSessionTimestamp = BatterySessionStore.getLastDischargingStartMillis(context)
         val historyTimestamp = inferLastDischargingTimestampFromHistory()
 
-        return@withContext listOfNotNull(usageEventsTimestamp, localSessionTimestamp, historyTimestamp).maxOrNull()
+        return@withContext resolveLastDischargingTimestamp(
+            usageEventsTimestamp = usageEventsTimestamp,
+            localSessionTimestamp = localSessionTimestamp,
+            historyTimestamp = historyTimestamp,
+        )
     }
 
     override suspend fun getRecentBatteryLevelSamples(
@@ -485,6 +489,20 @@ class AndroidBatteryDataProvider @Inject constructor(
         }
 
         return lastTransitionTimestamp
+    }
+
+    private fun resolveLastDischargingTimestamp(
+        usageEventsTimestamp: Long?,
+        localSessionTimestamp: Long?,
+        historyTimestamp: Long?,
+    ): Long? {
+        // UsageEvents is the most trustworthy source when present. Local/session fallbacks may be
+        // unavailable or coarse on OEM builds, so only use them when UsageEvents cannot help.
+        if (usageEventsTimestamp != null) {
+            return usageEventsTimestamp
+        }
+
+        return listOfNotNull(localSessionTimestamp, historyTimestamp).maxOrNull()
     }
 
     private fun BatteryStatus.isChargingState(): Boolean {
