@@ -48,7 +48,7 @@ class AndroidBatteryDataProvider @Inject constructor(
     override suspend fun getBatterySnapshot(): BatterySnapshot = withContext(Dispatchers.Default) {
         val batteryIntent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
 
-        val batteryStatusCode = batteryIntent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+        val batteryStatusCode = readBatteryStatusCode(batteryIntent)
         val batteryPluggedCode = batteryIntent?.getIntExtra(BatteryManager.EXTRA_PLUGGED, -1) ?: -1
         val batteryHealthCode = batteryIntent?.getIntExtra(BatteryManager.EXTRA_HEALTH, -1) ?: -1
 
@@ -217,6 +217,15 @@ class AndroidBatteryDataProvider @Inject constructor(
 
         val property = getIntBatteryProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
         return property?.coerceIn(0, 100)
+    }
+
+    private fun readBatteryStatusCode(intent: Intent?): Int {
+        val statusFromIntent = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+        if (statusFromIntent != -1) {
+            return statusFromIntent
+        }
+
+        return getIntBatteryProperty(BatteryManager.BATTERY_PROPERTY_STATUS) ?: -1
     }
 
     private fun getIntBatteryProperty(property: Int): Int? {
@@ -477,15 +486,22 @@ class AndroidBatteryDataProvider @Inject constructor(
             return null
         }
 
-        var previousStatus: BatteryStatus? = null
+        var previousSample: BatteryLevelSample? = null
         var lastTransitionTimestamp: Long? = null
 
         samples.forEach { sample ->
-            val nowStatus = sample.status
-            if (previousStatus?.isChargingState() == true && nowStatus.isDischargingState()) {
-                lastTransitionTimestamp = sample.timestampMillis
+            val previous = previousSample
+            if (
+                previous != null &&
+                previous.status.isChargingState() &&
+                sample.status.isDischargingState()
+            ) {
+                val transitionGapMillis = sample.timestampMillis - previous.timestampMillis
+                if (transitionGapMillis in 0L..MAX_HISTORY_TRANSITION_GAP_MILLIS) {
+                    lastTransitionTimestamp = sample.timestampMillis
+                }
             }
-            previousStatus = nowStatus
+            previousSample = sample
         }
 
         return lastTransitionTimestamp
@@ -502,7 +518,9 @@ class AndroidBatteryDataProvider @Inject constructor(
             return usageEventsTimestamp
         }
 
-        return listOfNotNull(localSessionTimestamp, historyTimestamp).maxOrNull()
+        // Local power-disconnect receiver timestamps are real event times and should win over
+        // sparse level-history transitions, which may only be observed when the app wakes.
+        return localSessionTimestamp ?: historyTimestamp
     }
 
     private fun BatteryStatus.isChargingState(): Boolean {
@@ -515,6 +533,7 @@ class AndroidBatteryDataProvider @Inject constructor(
 
     private companion object {
         private const val LAST_CHARGE_LOOKBACK_WINDOW_MILLIS = 14L * 24L * 60L * 60L * 1000L
+        private const val MAX_HISTORY_TRANSITION_GAP_MILLIS = 20L * 60L * 1000L
         private const val MILLI_VOLTS_PER_VOLT = 1_000
         private const val MILLI_VOLTS_PER_DECI_VOLT = 100
         private const val MILLI_VOLTS_PER_CENTI_VOLT = 10

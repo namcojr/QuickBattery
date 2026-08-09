@@ -37,12 +37,20 @@ class BatteryRepositoryImpl @Inject constructor(
         // sessions (the retained history already keeps up to a week of samples).
         val sessionLevelSamples = dataProvider.getRecentBatteryLevelSamples(SESSION_BASELINE_LOOKBACK_WINDOW_MILLIS)
 
-        val lastDischargingMillis = dataProvider.getLastDischargingTimestampMillis()
-        val inferredDischargingStartMillis = inferDischargingStartFromSamples(
-            snapshot = snapshot,
-            samples = recentLevelSamples,
-        )
-        val effectiveLastDischargingMillis = lastDischargingMillis ?: inferredDischargingStartMillis
+        // While charging the device is actively receiving power, so "time since charging stopped"
+        // is not meaningful and the expensive 14-day UsageEvents IPC scan is wasteful. Skip both
+        // to save battery and ensure the timer correctly resets as soon as a charger is connected.
+        val isCharging = snapshot.status.isChargingState()
+        val effectiveLastDischargingMillis: Long? = if (isCharging) {
+            null
+        } else {
+            val lastDischargingMillis = dataProvider.getLastDischargingTimestampMillis()
+            val inferredDischargingStartMillis = inferDischargingStartFromSamples(
+                snapshot = snapshot,
+                samples = recentLevelSamples,
+            )
+            lastDischargingMillis ?: inferredDischargingStartMillis
+        }
 
         val sinceLastChargeMillis = effectiveLastDischargingMillis
             ?.let { now - it }
@@ -236,18 +244,9 @@ class BatteryRepositoryImpl @Inject constructor(
             return transitionTimestamp
         }
 
-        val dischargingSamples = samples.filter { it.status.isDischargingState() }
-        if (dischargingSamples.size < MIN_TREND_SAMPLE_COUNT) {
-            return null
-        }
-
-        val oldest = dischargingSamples.first()
-        val newest = dischargingSamples.last()
-        if (newest.timestampMillis - oldest.timestampMillis < MIN_TREND_ELAPSED_MILLIS) {
-            return null
-        }
-
-        return oldest.timestampMillis
+        // Without an observed charging -> discharging transition, the oldest discharging sample is
+        // often just "first app wake" on OEM background-restricted devices, not true unplug time.
+        return null
     }
 
     private fun estimateRuntimeFromLevelTrend(

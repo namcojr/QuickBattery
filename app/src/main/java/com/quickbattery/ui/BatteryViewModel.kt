@@ -100,6 +100,6 @@ class BatteryViewModel @Inject constructor(
     }
 
     private companion object {
-        private const val AUTO_REFRESH_INTERVAL_MILLIS = 5L * 60L * 1000L
+        private const val AUTO_REFRESH_INTERVAL_MILLIS = 10L * 60L * 1000L
     }
 }
