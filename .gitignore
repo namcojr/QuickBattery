@@ -1,6 +1,8 @@
 .gradle/
+.gradle-home/
 /local.properties
 /.idea/
 /.kotlin/
 **/build/
+**/generated/
 captures/

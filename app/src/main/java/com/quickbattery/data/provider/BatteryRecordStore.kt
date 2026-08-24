@@ -4,6 +4,14 @@ import android.content.Context
 
 internal object BatteryRecordStore {
 
+    fun clear(context: Context) {
+        prefs(context)
+            .edit()
+            .remove(KEY_LONGEST_SINCE_LAST_CHARGE_MILLIS)
+            .remove(KEY_FULL_RUNTIME_ESTIMATE_SAMPLES)
+            .apply()
+    }
+
     /**
      * Persists the longest observed "time since charging stopped" duration and returns the current
      * record. When [candidateMillis] exceeds the stored record it becomes the new record.

@@ -119,6 +119,10 @@ private fun QuickBatteryApp(
                     openLifetimeAfterSave = false
                     showDatePicker = true
                 },
+                onResetCalculationData = {
+                    lifetimeViewModel.resetCalculationData()
+                    batteryViewModel.refresh()
+                },
             )
         }
     }

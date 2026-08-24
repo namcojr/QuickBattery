@@ -8,6 +8,8 @@ interface BatteryDataProvider {
 
     suspend fun getLastDischargingTimestampMillis(): Long?
 
+    suspend fun resetCalculationData()
+
     suspend fun getRecentBatteryLevelSamples(lookbackWindowMillis: Long): List<BatteryLevelSample>
 
     suspend fun updateSinceLastChargeRecord(candidateMillis: Long?): Long?

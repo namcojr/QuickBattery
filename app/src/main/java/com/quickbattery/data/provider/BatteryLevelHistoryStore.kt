@@ -6,6 +6,13 @@ import com.quickbattery.domain.model.BatteryStatus
 
 internal object BatteryLevelHistoryStore {
 
+    fun clear(context: Context) {
+        prefs(context)
+            .edit()
+            .remove(KEY_LEVEL_SAMPLES)
+            .apply()
+    }
+
     fun appendSnapshotSample(
         context: Context,
         snapshot: BatterySnapshot,
@@ -37,6 +44,38 @@ internal object BatteryLevelHistoryStore {
         )
 
         val cutoff = now - HISTORY_RETENTION_MILLIS
+        val pruned = existing
+            .filter { it.timestampMillis >= cutoff }
+            .takeLast(MAX_SAMPLES)
+
+        writeSamples(context, pruned)
+    }
+
+    /**
+     * Appends a raw (level, status) sample at [timestampMillis]. Used by the power-connection
+     * receiver to record definitive charge/discharge boundaries even when the app process was
+     * never opened, so charge-cycle detection stays reliable across cold starts.
+     */
+    fun appendSample(
+        context: Context,
+        timestampMillis: Long,
+        levelPercent: Int,
+        status: BatteryStatus,
+    ) {
+        val level = levelPercent.coerceIn(0, 100)
+        val existing = readSamples(context).toMutableList()
+        val last = existing.lastOrNull()
+        if (last != null && timestampMillis <= last.timestampMillis) {
+            return
+        }
+
+        existing += BatteryLevelSample(
+            timestampMillis = timestampMillis,
+            levelPercent = level,
+            status = status,
+        )
+
+        val cutoff = timestampMillis - HISTORY_RETENTION_MILLIS
         val pruned = existing
             .filter { it.timestampMillis >= cutoff }
             .takeLast(MAX_SAMPLES)

@@ -31,6 +31,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -62,6 +63,7 @@ fun BatteryLifetimeScreen(
     uiState: LifetimeUiState,
     onBack: () -> Unit,
     onEditPurchaseDate: () -> Unit,
+    onResetCalculationData: () -> Unit,
 ) {
     Scaffold(
         topBar = {
@@ -96,6 +98,7 @@ fun BatteryLifetimeScreen(
                     statistics = requireNotNull(uiState.statistics),
                     paddingValues = innerPadding,
                     onEditPurchaseDate = onEditPurchaseDate,
+                    onResetCalculationData = onResetCalculationData,
                 )
             }
         }
@@ -107,6 +110,7 @@ private fun LifetimeContent(
     statistics: LifetimeStatistics,
     paddingValues: PaddingValues,
     onEditPurchaseDate: () -> Unit,
+    onResetCalculationData: () -> Unit,
 ) {
     // Rotate the data-derived facts on every load without altering the deterministic calculation.
     val rotatedFacts = remember(statistics) { statistics.facts.shuffled() }
@@ -134,6 +138,14 @@ private fun LifetimeContent(
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text("Edit Purchase Date")
+            }
+        }
+        item {
+            OutlinedButton(
+                onClick = onResetCalculationData,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Reset Calculation Data")
             }
         }
     }

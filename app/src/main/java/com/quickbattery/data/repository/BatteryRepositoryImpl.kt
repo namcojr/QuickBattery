@@ -26,6 +26,10 @@ class BatteryRepositoryImpl @Inject constructor(
     @IoDispatcher private val ioDispatcher: CoroutineDispatcher,
 ) : BatteryRepository {
 
+    override suspend fun resetCalculationData() = withContext(ioDispatcher) {
+        dataProvider.resetCalculationData()
+    }
+
     override suspend fun getBatteryReport(): BatteryReport = withContext(ioDispatcher) {
         val snapshot = dataProvider.getBatterySnapshot()
         val now = System.currentTimeMillis()
@@ -311,9 +315,9 @@ class BatteryRepositoryImpl @Inject constructor(
         }
 
         val level = snapshot.levelPercent ?: return null
-        // Use the actual level when the phone was unplugged as the baseline instead of assuming a
-        // full 100% charge; this removes a large error when charging stops below 100%.
-        val baseline = (dischargeStartLevelPercent ?: 100).coerceIn(level, 100)
+        // Return null when the unplug level is unknown: a wrong 100% fallback would massively
+        // overstate consumed percent on partial charges (e.g. 40 -> 60%), skewing the estimate.
+        val baseline = dischargeStartLevelPercent?.coerceIn(level, 100) ?: return null
         val consumed = baseline - level
         return consumed.takeIf { it > 0 }
     }

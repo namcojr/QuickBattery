@@ -59,6 +59,15 @@ class LifetimeViewModel @Inject constructor(
         }
     }
 
+    fun resetCalculationData() {
+        viewModelScope.launch {
+            batteryRepository.resetCalculationData()
+            if (loadRequested) {
+                recompute()
+            }
+        }
+    }
+
     private fun recompute() {
         val purchase = purchaseDateMillis
         if (purchase == null) {

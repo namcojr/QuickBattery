@@ -97,7 +97,7 @@ private fun AppUsageRow(usage: AppBatteryUsage) {
                 maxLines = 1,
             )
             Text(
-                text = "Screen-on: ${formatDuration(usage.screenOnTimeMillis)}",
+                text = "Active: ${formatDuration(usage.screenOnTimeMillis)}",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.82f),
             )

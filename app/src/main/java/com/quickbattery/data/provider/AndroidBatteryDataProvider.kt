@@ -108,15 +108,42 @@ class AndroidBatteryDataProvider @Inject constructor(
     }
 
     override suspend fun getLastDischargingTimestampMillis(): Long? = withContext(Dispatchers.Default) {
-        val usageEventsTimestamp = readLastDischargingTimestampFromUsageEvents()
-        val localSessionTimestamp = BatterySessionStore.getLastDischargingStartMillis(context)
-        val historyTimestamp = inferLastDischargingTimestampFromHistory()
-
-        return@withContext resolveLastDischargingTimestamp(
-            usageEventsTimestamp = usageEventsTimestamp,
-            localSessionTimestamp = localSessionTimestamp,
-            historyTimestamp = historyTimestamp,
+        val now = System.currentTimeMillis()
+        val samples = BatteryLevelHistoryStore.getRecentSamples(
+            context = context,
+            lookbackWindowMillis = LAST_CHARGE_LOOKBACK_WINDOW_MILLIS,
         )
+
+        // The most recent moment we have hard evidence the device was charging (a Charging/Full
+        // sample, or a battery-level increase). Any candidate discharge-start that predates this is
+        // from a stale, already-superseded cycle and must be discarded.
+        val lastChargeEvidenceMillis = findLastChargeEvidenceMillis(samples)
+        val historyTimestamp = inferLastDischargingTimestampFromHistory(samples, lastChargeEvidenceMillis)
+
+        val sessionTimestamp = BatterySessionStore.getLastDischargingStartMillis(context)
+            ?.takeIf { isNotStale(it, lastChargeEvidenceMillis) }
+        val usageEventsTimestamp = readLastDischargingTimestampFromUsageEvents()
+            ?.takeIf { isNotStale(it, lastChargeEvidenceMillis) }
+
+        // Prefer the precise unplug instant from a broadcast, then the OS discharging event, and
+        // only fall back to the coarser history inference. All are validated against the newest
+        // charging evidence, so a stale previous-session value can never keep the timer running.
+        return@withContext (sessionTimestamp ?: usageEventsTimestamp ?: historyTimestamp)
+            ?.takeIf { it in 0L..now }
+    }
+
+    private fun isNotStale(
+        candidateMillis: Long,
+        lastChargeEvidenceMillis: Long?,
+    ): Boolean {
+        return lastChargeEvidenceMillis == null || candidateMillis >= lastChargeEvidenceMillis
+    }
+
+
+    override suspend fun resetCalculationData() = withContext(Dispatchers.Default) {
+        BatteryRecordStore.clear(context)
+        BatteryLevelHistoryStore.clear(context)
+        BatterySessionStore.clear(context)
     }
 
     override suspend fun getRecentBatteryLevelSamples(
@@ -156,22 +183,21 @@ class AndroidBatteryDataProvider @Inject constructor(
 
         val manager = usageStatsManager ?: return@withContext emptyList()
         val packageManager = context.packageManager
-        val usageStats = manager.queryUsageStats(UsageStatsManager.INTERVAL_DAILY, sinceMillis, untilMillis)
-        if (usageStats.isNullOrEmpty()) {
+
+        val usageByPackage = usageDurationsByPackage(
+            manager = manager,
+            sinceMillis = sinceMillis,
+            untilMillis = untilMillis,
+        )
+        if (usageByPackage.isEmpty()) {
             return@withContext emptyList()
         }
 
-        val usageByPackage = mutableMapOf<String, Long>()
-        usageStats.forEach { usage ->
-            val usageDurationMillis = usage.visibleTimeMillis()
-            if (usageDurationMillis <= 0L) return@forEach
-
-            val existing = usageByPackage[usage.packageName] ?: 0L
-            usageByPackage[usage.packageName] = existing + usageDurationMillis
-        }
-
         usageByPackage
-            .mapNotNull { (packageName, totalVisibleTime) ->
+            .mapNotNull { (packageName, totalActiveTimeMillis) ->
+                if (totalActiveTimeMillis <= 0L) {
+                    return@mapNotNull null
+                }
                 runCatching {
                     val appInfo = packageManager.getApplicationInfo(packageName, 0)
                     val appLabel = packageManager.getApplicationLabel(appInfo).toString()
@@ -181,11 +207,136 @@ class AndroidBatteryDataProvider @Inject constructor(
                         packageName = packageName,
                         appName = appLabel,
                         iconPng = iconDrawable.toPngByteArray(),
-                        screenOnTimeMillis = totalVisibleTime,
+                        screenOnTimeMillis = totalActiveTimeMillis,
                     )
                 }.getOrNull()
             }
             .sortedByDescending { it.screenOnTimeMillis }
+    }
+
+    // Per-package active time within the window. Combines two signals so that apps active without
+    // holding the phone's own screen -- most importantly navigation running via Android Auto, which
+    // projects to the car display but runs a foreground service on the phone -- are still counted:
+    //   1. Foreground activity + foreground-service intervals derived from UsageEvents (captures
+    //      Android Auto / background-projected usage the visible-time aggregate misses).
+    //   2. The classic queryUsageStats visible/foreground total as a fallback baseline.
+    // The larger of the two is kept per package.
+    private fun usageDurationsByPackage(
+        manager: UsageStatsManager,
+        sinceMillis: Long,
+        untilMillis: Long,
+    ): Map<String, Long> {
+        val eventDurations = usageDurationsFromEvents(manager, sinceMillis, untilMillis)
+        val visibleDurations = usageDurationsFromStats(manager, sinceMillis, untilMillis)
+
+        val merged = HashMap<String, Long>(eventDurations)
+        visibleDurations.forEach { (packageName, millis) ->
+            val existing = merged[packageName] ?: 0L
+            merged[packageName] = maxOf(existing, millis)
+        }
+        return merged
+    }
+
+    private fun usageDurationsFromStats(
+        manager: UsageStatsManager,
+        sinceMillis: Long,
+        untilMillis: Long,
+    ): Map<String, Long> {
+        val usageStats = manager.queryUsageStats(UsageStatsManager.INTERVAL_DAILY, sinceMillis, untilMillis)
+        if (usageStats.isNullOrEmpty()) {
+            return emptyMap()
+        }
+
+        val usageByPackage = HashMap<String, Long>()
+        usageStats.forEach { usage ->
+            val usageDurationMillis = usage.visibleTimeMillis()
+            if (usageDurationMillis <= 0L) return@forEach
+
+            val existing = usageByPackage[usage.packageName] ?: 0L
+            usageByPackage[usage.packageName] = existing + usageDurationMillis
+        }
+        return usageByPackage
+    }
+
+    private fun usageDurationsFromEvents(
+        manager: UsageStatsManager,
+        sinceMillis: Long,
+        untilMillis: Long,
+    ): Map<String, Long> {
+        val events = runCatching { manager.queryEvents(sinceMillis, untilMillis) }.getOrNull()
+            ?: return emptyMap()
+        val event = UsageEvents.Event()
+
+        val intervalsByPackage = HashMap<String, MutableList<LongArray>>()
+        val foregroundStart = HashMap<String, Long>()
+        val serviceStart = HashMap<String, Long>()
+
+        fun addInterval(packageName: String, start: Long, end: Long) {
+            val clampedStart = start.coerceAtLeast(sinceMillis)
+            val clampedEnd = end.coerceAtMost(untilMillis)
+            if (clampedEnd > clampedStart) {
+                intervalsByPackage.getOrPut(packageName) { mutableListOf() }
+                    .add(longArrayOf(clampedStart, clampedEnd))
+            }
+        }
+
+        while (events.hasNextEvent()) {
+            events.getNextEvent(event)
+            val packageName = event.packageName ?: continue
+            when (event.eventType) {
+                UsageEvents.Event.MOVE_TO_FOREGROUND ->
+                    foregroundStart[packageName] = event.timeStamp
+
+                UsageEvents.Event.MOVE_TO_BACKGROUND -> {
+                    val start = foregroundStart.remove(packageName) ?: sinceMillis
+                    addInterval(packageName, start, event.timeStamp)
+                }
+
+                FOREGROUND_SERVICE_START_EVENT ->
+                    serviceStart[packageName] = event.timeStamp
+
+                FOREGROUND_SERVICE_STOP_EVENT -> {
+                    val start = serviceStart.remove(packageName) ?: sinceMillis
+                    addInterval(packageName, start, event.timeStamp)
+                }
+            }
+        }
+
+        // Close intervals still open at the end of the window (app or service never went
+        // background before "until", e.g. navigation still running when the report is generated).
+        foregroundStart.forEach { (packageName, start) -> addInterval(packageName, start, untilMillis) }
+        serviceStart.forEach { (packageName, start) -> addInterval(packageName, start, untilMillis) }
+
+        return intervalsByPackage.mapValues { (_, intervals) -> mergedIntervalDurationMillis(intervals) }
+    }
+
+    // Total covered duration of a set of intervals, merging overlaps so concurrent foreground +
+    // foreground-service activity for the same app is not double-counted.
+    private fun mergedIntervalDurationMillis(intervals: List<LongArray>): Long {
+        if (intervals.isEmpty()) {
+            return 0L
+        }
+
+        val sorted = intervals.sortedBy { it[0] }
+        var total = 0L
+        var currentStart = sorted.first()[0]
+        var currentEnd = sorted.first()[1]
+
+        for (index in 1 until sorted.size) {
+            val start = sorted[index][0]
+            val end = sorted[index][1]
+            if (start <= currentEnd) {
+                if (end > currentEnd) {
+                    currentEnd = end
+                }
+            } else {
+                total += currentEnd - currentStart
+                currentStart = start
+                currentEnd = end
+            }
+        }
+        total += currentEnd - currentStart
+        return total
     }
 
     override fun hasUsageStatsPermission(): Boolean {
@@ -477,50 +628,51 @@ class AndroidBatteryDataProvider @Inject constructor(
         return lastDischarging
     }
 
-    private fun inferLastDischargingTimestampFromHistory(): Long? {
-        val samples = BatteryLevelHistoryStore.getRecentSamples(
-            context = context,
-            lookbackWindowMillis = LAST_CHARGE_LOOKBACK_WINDOW_MILLIS,
-        )
-        if (samples.size < 2) {
+    private fun inferLastDischargingTimestampFromHistory(
+        samples: List<BatteryLevelSample>,
+        lastChargeEvidenceMillis: Long?,
+    ): Long? {
+        if (samples.size < 2 || lastChargeEvidenceMillis == null) {
             return null
         }
 
-        var previousSample: BatteryLevelSample? = null
-        var lastTransitionTimestamp: Long? = null
-
-        samples.forEach { sample ->
-            val previous = previousSample
-            if (
-                previous != null &&
-                previous.status.isChargingState() &&
-                sample.status.isDischargingState()
-            ) {
-                val transitionGapMillis = sample.timestampMillis - previous.timestampMillis
-                if (transitionGapMillis in 0L..MAX_HISTORY_TRANSITION_GAP_MILLIS) {
-                    lastTransitionTimestamp = sample.timestampMillis
-                }
+        // Charging stopped somewhere between the last charging evidence and the first discharging
+        // sample observed after it. When those samples are close together the discharging sample is
+        // a reliable unplug marker; when the gap is large (sparse sampling on OEM-restricted
+        // devices, or the app was closed across the whole cycle) the last confirmed charging
+        // timestamp is the best available lower bound -- far better than falling through to a stale
+        // previous-session value.
+        val firstDischargingAfterCharge = samples
+            .asSequence()
+            .filter {
+                it.status.isDischargingState() && it.timestampMillis > lastChargeEvidenceMillis
             }
-            previousSample = sample
-        }
+            .minByOrNull { it.timestampMillis }
+            ?: return lastChargeEvidenceMillis
 
-        return lastTransitionTimestamp
+        val transitionGapMillis = firstDischargingAfterCharge.timestampMillis - lastChargeEvidenceMillis
+        return if (transitionGapMillis in 0L..MAX_HISTORY_TRANSITION_GAP_MILLIS) {
+            firstDischargingAfterCharge.timestampMillis
+        } else {
+            lastChargeEvidenceMillis
+        }
     }
 
-    private fun resolveLastDischargingTimestamp(
-        usageEventsTimestamp: Long?,
-        localSessionTimestamp: Long?,
-        historyTimestamp: Long?,
-    ): Long? {
-        // UsageEvents is the most trustworthy source when present. Local/session fallbacks may be
-        // unavailable or coarse on OEM builds, so only use them when UsageEvents cannot help.
-        if (usageEventsTimestamp != null) {
-            return usageEventsTimestamp
+    // Newest timestamp with hard evidence the device was charging: a Charging/Full sample, or a
+    // battery-level increase between consecutive samples (some OEMs mislabel the status but the
+    // rising level is unambiguous proof a charge occurred).
+    private fun findLastChargeEvidenceMillis(samples: List<BatteryLevelSample>): Long? {
+        var result: Long? = null
+        var previous: BatteryLevelSample? = null
+        samples.forEach { sample ->
+            val prev = previous
+            val levelRose = prev != null && sample.levelPercent > prev.levelPercent
+            if (sample.status.isChargingState() || levelRose) {
+                result = sample.timestampMillis
+            }
+            previous = sample
         }
-
-        // Local power-disconnect receiver timestamps are real event times and should win over
-        // sparse level-history transitions, which may only be observed when the app wakes.
-        return localSessionTimestamp ?: historyTimestamp
+        return result
     }
 
     private fun BatteryStatus.isChargingState(): Boolean {
@@ -553,6 +705,12 @@ class AndroidBatteryDataProvider @Inject constructor(
         // BatteryManager.EXTRA_CYCLE_COUNT (public since Android 14). Declared as a literal so the
         // extra is still read on capable devices when compiling against older SDKs.
         private const val EXTRA_CYCLE_COUNT = "android.os.extra.CYCLE_COUNT"
+
+        // UsageEvents.Event.FOREGROUND_SERVICE_START / _STOP (API 29+). Declared as literals so the
+        // foreground-service intervals are matched on capable devices while still compiling and
+        // running down to minSdk 28 (where these events simply never occur).
+        private const val FOREGROUND_SERVICE_START_EVENT = 19
+        private const val FOREGROUND_SERVICE_STOP_EVENT = 20
 
         // Candidate fuel-gauge nodes exposing the precise instantaneous voltage. Read best-effort;
         // unreadable on SELinux-restricted devices, in which case we fall back to EXTRA_VOLTAGE.

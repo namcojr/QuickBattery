@@ -5,6 +5,15 @@ import com.quickbattery.domain.model.BatteryStatus
 
 internal object BatterySessionStore {
 
+    fun clear(context: Context) {
+        prefs(context)
+            .edit()
+            .remove(KEY_DISCHARGING_STARTED_AT_MILLIS)
+            .remove(KEY_LAST_STATUS)
+            .remove(KEY_LAST_STATUS_UPDATED_AT_MILLIS)
+            .apply()
+    }
+
     fun markPowerDisconnected(
         context: Context,
         timestampMillis: Long = System.currentTimeMillis(),
@@ -37,7 +46,23 @@ internal object BatterySessionStore {
 
         when {
             status.isChargingState() -> {
-                markPowerConnected(context)
+                val editor = prefs(context)
+                    .edit()
+                    .putString(KEY_LAST_STATUS, status.name)
+                    .putLong(KEY_LAST_STATUS_UPDATED_AT_MILLIS, timestampMillis)
+
+                // Only clear the discharge-session start when a fresh discharging -> charging
+                // transition is confirmed in snapshot data. Without this guard, a briefly-
+                // lingering Full status right after unplug would erase the session start time
+                // that PowerConnectionReceiver just recorded, causing "Learning..." mid-session.
+                val previousStatusIsFresh = previousStatusUpdatedAtMillis != null &&
+                    (timestampMillis - previousStatusUpdatedAtMillis) in
+                    0L..SNAPSHOT_TRANSITION_MAX_STALENESS_MILLIS
+                if (previousStatus?.isDischargingState() == true && previousStatusIsFresh) {
+                    editor.remove(KEY_DISCHARGING_STARTED_AT_MILLIS)
+                }
+
+                editor.apply()
             }
 
             status.isDischargingState() -> {
