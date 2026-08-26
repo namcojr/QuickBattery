@@ -15,8 +15,8 @@ android {
         applicationId = "com.quickbattery"
         minSdk = 28
         targetSdk = 35
-        versionCode = 23
-        versionName = "2.3.0"
+        versionCode = 26
+        versionName = "2.6.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

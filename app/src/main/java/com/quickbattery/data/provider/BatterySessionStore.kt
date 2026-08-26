@@ -5,7 +5,12 @@ import com.quickbattery.domain.model.BatteryStatus
 
 internal object BatterySessionStore {
 
-    fun clear(context: Context) {
+    // Serializes read-modify-write across the foreground service (main thread) and the provider
+    // (background dispatcher) so a discharge-session start can't be clobbered by an interleaved
+    // update.
+    private val lock = Any()
+
+    fun clear(context: Context) = synchronized(lock) {
         prefs(context)
             .edit()
             .remove(KEY_DISCHARGING_STARTED_AT_MILLIS)
@@ -17,7 +22,7 @@ internal object BatterySessionStore {
     fun markPowerDisconnected(
         context: Context,
         timestampMillis: Long = System.currentTimeMillis(),
-    ) {
+    ) = synchronized(lock) {
         prefs(context)
             .edit()
             .putLong(KEY_DISCHARGING_STARTED_AT_MILLIS, timestampMillis)
@@ -26,7 +31,7 @@ internal object BatterySessionStore {
             .apply()
     }
 
-    fun markPowerConnected(context: Context) {
+    fun markPowerConnected(context: Context) = synchronized(lock) {
         val now = System.currentTimeMillis()
         prefs(context)
             .edit()
@@ -40,7 +45,7 @@ internal object BatterySessionStore {
         context: Context,
         status: BatteryStatus,
         timestampMillis: Long,
-    ) {
+    ) = synchronized(lock) {
         val previousStatus = readLastStatus(context)
         val previousStatusUpdatedAtMillis = readLastStatusUpdatedAt(context)
 
@@ -71,11 +76,15 @@ internal object BatterySessionStore {
                     .putString(KEY_LAST_STATUS, status.name)
                     .putLong(KEY_LAST_STATUS_UPDATED_AT_MILLIS, timestampMillis)
 
-                // Only trust snapshot timestamps when a charging -> discharging transition is observed.
+                // Only trust snapshot timestamps when a charging -> discharging transition is observed,
+                // and only when the device is genuinely on battery. BATTERY_STATUS_NOT_CHARGING means
+                // "plugged in but not charging" (charge limit, full, or too hot), so it must NOT start a
+                // discharge session -- doing so would make the timer run while still on the charger.
                 val previousStatusIsFresh = previousStatusUpdatedAtMillis != null &&
                     (timestampMillis - previousStatusUpdatedAtMillis) in
                     0L..SNAPSHOT_TRANSITION_MAX_STALENESS_MILLIS
-                if (previousStatus?.isChargingState() == true && previousStatusIsFresh) {
+                val isRealUnplug = status == BatteryStatus.Discharging
+                if (previousStatus?.isChargingState() == true && previousStatusIsFresh && isRealUnplug) {
                     editor.putLong(KEY_DISCHARGING_STARTED_AT_MILLIS, timestampMillis)
                 }
 

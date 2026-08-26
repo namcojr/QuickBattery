@@ -3,10 +3,12 @@ package com.quickbattery.data.provider
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
-import android.os.BatteryManager
-import com.quickbattery.domain.model.BatteryStatus
 
+/**
+ * Manifest-declared backup for power connect/disconnect events. The always-on
+ * [BatteryMonitorService] is the primary observer; this receiver adds redundancy in case the
+ * service is momentarily not running (e.g. right after an OEM kill, before it is restarted).
+ */
 class PowerConnectionReceiver : BroadcastReceiver() {
     override fun onReceive(
         context: Context,
@@ -14,38 +16,10 @@ class PowerConnectionReceiver : BroadcastReceiver() {
     ) {
         val now = System.currentTimeMillis()
         when (intent?.action) {
-            Intent.ACTION_POWER_CONNECTED -> {
-                BatterySessionStore.markPowerConnected(context)
-                recordBoundarySample(context, now, BatteryStatus.Charging)
-            }
-
-            Intent.ACTION_POWER_DISCONNECTED -> {
-                BatterySessionStore.markPowerDisconnected(context, now)
-                recordBoundarySample(context, now, BatteryStatus.Discharging)
-            }
+            Intent.ACTION_POWER_CONNECTED -> BatteryEventRecorder.onPowerConnected(context, now)
+            Intent.ACTION_POWER_DISCONNECTED -> BatteryEventRecorder.onPowerDisconnected(context, now)
         }
-    }
-
-    // Persist a definitive charge/discharge boundary into the level history so charge-cycle
-    // detection stays reliable even when the app process is never launched between charges.
-    private fun recordBoundarySample(
-        context: Context,
-        timestampMillis: Long,
-        status: BatteryStatus,
-    ) {
-        val batteryIntent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-        val level = batteryIntent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
-        val scale = batteryIntent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
-        if (level < 0 || scale <= 0) {
-            return
-        }
-
-        val levelPercent = (level * 100f / scale.toFloat()).toInt().coerceIn(0, 100)
-        BatteryLevelHistoryStore.appendSample(
-            context = context,
-            timestampMillis = timestampMillis,
-            levelPercent = levelPercent,
-            status = status,
-        )
+        // Ensure the monitor is running again as soon as any power event is observed.
+        BatteryMonitorService.start(context)
     }
 }

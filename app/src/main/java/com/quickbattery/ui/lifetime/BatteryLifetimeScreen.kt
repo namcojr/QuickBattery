@@ -62,6 +62,7 @@ import com.quickbattery.ui.components.ShimmerPlaceholder
 fun BatteryLifetimeScreen(
     uiState: LifetimeUiState,
     onBack: () -> Unit,
+    onToggleTheme: () -> Unit,
     onEditPurchaseDate: () -> Unit,
     onResetCalculationData: () -> Unit,
 ) {
@@ -97,6 +98,7 @@ fun BatteryLifetimeScreen(
                 LifetimeContent(
                     statistics = requireNotNull(uiState.statistics),
                     paddingValues = innerPadding,
+                    onToggleTheme = onToggleTheme,
                     onEditPurchaseDate = onEditPurchaseDate,
                     onResetCalculationData = onResetCalculationData,
                 )
@@ -109,6 +111,7 @@ fun BatteryLifetimeScreen(
 private fun LifetimeContent(
     statistics: LifetimeStatistics,
     paddingValues: PaddingValues,
+    onToggleTheme: () -> Unit,
     onEditPurchaseDate: () -> Unit,
     onResetCalculationData: () -> Unit,
 ) {
@@ -132,6 +135,14 @@ private fun LifetimeContent(
         item { UsageProfileCard(statistics.usageProfile) }
         item { FactsCard(rotatedFacts) }
         item { TimelineCard(statistics.timeline) }
+        item {
+            OutlinedButton(
+                onClick = onToggleTheme,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Change Theme")
+            }
+        }
         item {
             Button(
                 onClick = onEditPurchaseDate,

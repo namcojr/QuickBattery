@@ -4,8 +4,10 @@ import com.quickbattery.data.provider.AndroidBatteryDataProvider
 import com.quickbattery.data.provider.BatteryDataProvider
 import com.quickbattery.data.repository.BatteryRepositoryImpl
 import com.quickbattery.data.repository.PurchaseDateRepositoryImpl
+import com.quickbattery.data.repository.ThemeRepositoryImpl
 import com.quickbattery.domain.repository.BatteryRepository
 import com.quickbattery.domain.repository.PurchaseDateRepository
+import com.quickbattery.domain.repository.ThemeRepository
 import dagger.Binds
 import dagger.Module
 import dagger.hilt.InstallIn
@@ -33,4 +35,10 @@ abstract class BatteryModule {
     abstract fun bindPurchaseDateRepository(
         repository: PurchaseDateRepositoryImpl,
     ): PurchaseDateRepository
+
+    @Binds
+    @Singleton
+    abstract fun bindThemeRepository(
+        repository: ThemeRepositoryImpl,
+    ): ThemeRepository
 }

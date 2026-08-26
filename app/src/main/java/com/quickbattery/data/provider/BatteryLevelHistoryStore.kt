@@ -6,7 +6,11 @@ import com.quickbattery.domain.model.BatteryStatus
 
 internal object BatteryLevelHistoryStore {
 
-    fun clear(context: Context) {
+    // Guards read-modify-write across concurrent callers (foreground service on the main thread,
+    // provider on a background dispatcher). Without it, interleaved appends drop samples.
+    private val lock = Any()
+
+    fun clear(context: Context) = synchronized(lock) {
         prefs(context)
             .edit()
             .remove(KEY_LEVEL_SAMPLES)
@@ -16,8 +20,8 @@ internal object BatteryLevelHistoryStore {
     fun appendSnapshotSample(
         context: Context,
         snapshot: BatterySnapshot,
-    ) {
-        val level = snapshot.levelPercent ?: return
+    ) = synchronized(lock) {
+        val level = snapshot.levelPercent ?: return@synchronized
         val now = snapshot.timestampMillis
 
         val existing = readSamples(context).toMutableList()
@@ -25,7 +29,7 @@ internal object BatteryLevelHistoryStore {
 
         if (last != null) {
             if (now <= last.timestampMillis) {
-                return
+                return@synchronized
             }
 
             val unchanged =
@@ -33,49 +37,93 @@ internal object BatteryLevelHistoryStore {
                     last.status == snapshot.status &&
                     now - last.timestampMillis < MIN_SAMPLE_INTERVAL_MILLIS
             if (unchanged) {
-                return
+                return@synchronized
             }
         }
 
-        existing += BatteryLevelSample(
-            timestampMillis = now,
-            levelPercent = level,
-            status = snapshot.status,
+        appendPruneWrite(
+            context = context,
+            existing = existing,
+            sample = BatteryLevelSample(
+                timestampMillis = now,
+                levelPercent = level,
+                status = snapshot.status,
+            ),
         )
-
-        val cutoff = now - HISTORY_RETENTION_MILLIS
-        val pruned = existing
-            .filter { it.timestampMillis >= cutoff }
-            .takeLast(MAX_SAMPLES)
-
-        writeSamples(context, pruned)
     }
 
     /**
-     * Appends a raw (level, status) sample at [timestampMillis]. Used by the power-connection
-     * receiver to record definitive charge/discharge boundaries even when the app process was
-     * never opened, so charge-cycle detection stays reliable across cold starts.
+     * Appends a raw (level, status) boundary sample at [timestampMillis]. Used for definitive
+     * charge/discharge boundaries (power connect/disconnect) that must always be recorded, so
+     * charge-cycle detection stays reliable across cold starts.
      */
     fun appendSample(
         context: Context,
         timestampMillis: Long,
         levelPercent: Int,
         status: BatteryStatus,
-    ) {
+    ) = synchronized(lock) {
         val level = levelPercent.coerceIn(0, 100)
         val existing = readSamples(context).toMutableList()
         val last = existing.lastOrNull()
         if (last != null && timestampMillis <= last.timestampMillis) {
-            return
+            return@synchronized
         }
 
-        existing += BatteryLevelSample(
-            timestampMillis = timestampMillis,
-            levelPercent = level,
-            status = status,
+        appendPruneWrite(
+            context = context,
+            existing = existing,
+            sample = BatteryLevelSample(
+                timestampMillis = timestampMillis,
+                levelPercent = level,
+                status = status,
+            ),
         )
+    }
 
-        val cutoff = timestampMillis - HISTORY_RETENTION_MILLIS
+    /**
+     * Change-based append for the always-on monitor. ACTION_BATTERY_CHANGED fires on
+     * voltage/temperature changes too, so recording every event unthrottled would evict the 7-day
+     * history within minutes. Only a level or status change (relative to the last sample) is
+     * persisted, keeping the log compact and retention-friendly while preserving every transition.
+     */
+    fun appendSampleIfChanged(
+        context: Context,
+        timestampMillis: Long,
+        levelPercent: Int,
+        status: BatteryStatus,
+    ) = synchronized(lock) {
+        val level = levelPercent.coerceIn(0, 100)
+        val existing = readSamples(context).toMutableList()
+        val last = existing.lastOrNull()
+        if (last != null) {
+            if (timestampMillis <= last.timestampMillis) {
+                return@synchronized
+            }
+            if (last.levelPercent == level && last.status == status) {
+                return@synchronized
+            }
+        }
+
+        appendPruneWrite(
+            context = context,
+            existing = existing,
+            sample = BatteryLevelSample(
+                timestampMillis = timestampMillis,
+                levelPercent = level,
+                status = status,
+            ),
+        )
+    }
+
+    private fun appendPruneWrite(
+        context: Context,
+        existing: MutableList<BatteryLevelSample>,
+        sample: BatteryLevelSample,
+    ) {
+        existing += sample
+
+        val cutoff = sample.timestampMillis - HISTORY_RETENTION_MILLIS
         val pruned = existing
             .filter { it.timestampMillis >= cutoff }
             .takeLast(MAX_SAMPLES)

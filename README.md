@@ -225,17 +225,18 @@ The interface is inspired by Samsung One UI while remaining an original implemen
 
 # Performance
 
-Battery Insights was intentionally designed to have negligible battery impact.
+Battery Insights was designed to have negligible battery impact.
 
 The application:
 
-- Does not run foreground services
-- Does not use WorkManager
-- Does not schedule alarms
-- Does not collect battery history
-- Does not monitor the battery while closed
+- Runs a lightweight always-on foreground service to observe charge/discharge transitions
+- Uses no WorkManager
+- Schedules no alarms
+- Reacts only to system battery broadcasts (no polling)
+- Keeps time-since-last-charge accurate even while the app is closed
 
-All calculations occur only while the application is open.
+The foreground service performs no periodic wake-ups; it only reacts to battery
+broadcasts the system already emits, so its ongoing cost is negligible.
 
 ---
 
