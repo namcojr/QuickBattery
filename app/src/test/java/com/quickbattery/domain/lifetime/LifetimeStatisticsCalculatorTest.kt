@@ -102,6 +102,24 @@ class LifetimeStatisticsCalculatorTest {
     }
 
     @Test
+    fun healthInterpretation_percentageGoodTierUsesBaseTier() {
+        val stats = calculator.calculate(input(days = 184, chargeCycles = 184, health = "82% - Good"))
+        assertEquals("Heavy Usage", stats.health.interpretation)
+    }
+
+    @Test
+    fun healthInterpretation_percentageExcellentTierUsesBaseTier() {
+        val stats = calculator.calculate(input(days = 184, chargeCycles = 184, health = "95% - Excellent"))
+        assertEquals("Heavy Usage", stats.health.interpretation)
+    }
+
+    @Test
+    fun healthInterpretation_percentageDegradedTierDowngrades() {
+        val stats = calculator.calculate(input(days = 184, chargeCycles = 184, health = "45% - Replace Soon"))
+        assertEquals("Very Heavy Usage", stats.health.interpretation)
+    }
+
+    @Test
     fun health_unavailableWhenHealthMissing() {
         val stats = calculator.calculate(input(days = 184, chargeCycles = 184, health = null))
         assertFalse(stats.health.available)

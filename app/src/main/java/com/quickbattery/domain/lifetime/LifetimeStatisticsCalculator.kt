@@ -202,10 +202,18 @@ class LifetimeStatisticsCalculator @Inject constructor() {
             cyclesPerDay < 1.30 -> 3
             else -> 4
         }
-        val healthy = health.equals("Good", ignoreCase = true) ||
-            health.equals("Unknown", ignoreCase = true)
-        val tier = if (healthy) baseTier else (baseTier + 1).coerceAtMost(HEALTH_TIERS.lastIndex)
+        val tier = if (isHealthyState(health)) baseTier else (baseTier + 1).coerceAtMost(HEALTH_TIERS.lastIndex)
         return HEALTH_TIERS[tier]
+    }
+
+    /**
+     * Determines whether the reported battery health represents a healthy state. Handles both the
+     * categorical values (e.g. "Good") and the state-of-health format "<percent>% - <tier>" (e.g.
+     * "82% - Good"), taking the tier label after the dash when present.
+     */
+    private fun isHealthyState(health: String): Boolean {
+        val tier = health.substringAfterLast('-', health).trim()
+        return HEALTHY_HEALTH_LABELS.any { tier.equals(it, ignoreCase = true) }
     }
 
     private fun buildUsageProfile(cyclesPerDay: Double?): UsageProfileUi {
@@ -362,6 +370,9 @@ class LifetimeStatisticsCalculator @Inject constructor() {
             "Heavy Usage",
             "Very Heavy Usage",
         )
+        // Health tiers treated as "not degraded"; "Unknown" is filtered out upstream but kept here
+        // so a device that still surfaces it isn't penalized with a tier downgrade.
+        val HEALTHY_HEALTH_LABELS = setOf("Good", "Excellent", "Unknown")
 
         val FULL_DATE_FORMATTER: DateTimeFormatter =
             DateTimeFormatter.ofPattern("MMMM d, yyyy", Locale.US)
