@@ -416,15 +416,6 @@ class BatteryRepositoryImpl @Inject constructor(
         }
         val currentMilliAmps = resolveChargingCurrentMilliAmps(snapshot) ?: return null
 
-        val tier = when {
-            currentMilliAmps >= SUPER_VOOC_ESTIMATE_THRESHOLD_MILLI_AMPS -> "Super VOOC"
-            currentMilliAmps >= ULTRA_FAST_THRESHOLD_MILLI_AMPS -> "Ultra Fast"
-            currentMilliAmps >= FAST_THRESHOLD_MILLI_AMPS -> "Fast"
-            currentMilliAmps >= NORMAL_THRESHOLD_MILLI_AMPS -> "Normal"
-            currentMilliAmps > 0f -> "Slow"
-            else -> return null
-        }
-
         // Charging power P(W) = V(volts) x I(amps). Use the real PACK voltage: on multi-cell
         // (series) packs the fuel gauge's voltage_now reports the per-cell voltage (~4 V), while the
         // pack is N cells in series, so the true charging voltage is N x that.
@@ -432,10 +423,40 @@ class BatteryRepositoryImpl @Inject constructor(
             ?.takeIf { it > 0 }
             ?.let { (it.toFloat() / 1000f) * (currentMilliAmps / 1000f) }
 
+        // Classify by power when the pack wattage is known: it is brand-neutral and correct for
+        // dual-cell SuperVOOC/Warp/HyperCharge packs, whose battery-side current is ~half that of a
+        // single-cell phone at the same power. Fall back to the coarse current tiers only when the
+        // wattage cannot be computed (e.g. voltage unavailable).
+        val tier = watts?.let(::chargingTierFromWatts)
+            ?: chargingTierFromCurrent(currentMilliAmps)
+            ?: return null
+
         return if (watts != null) {
             "$tier - ${"%.1f".format(watts)} W"
         } else {
             tier
+        }
+    }
+
+    private fun chargingTierFromWatts(watts: Float): String? {
+        return when {
+            watts >= SUPER_FAST_THRESHOLD_WATTS -> "Super Fast"
+            watts >= ULTRA_FAST_THRESHOLD_WATTS -> "Ultra Fast"
+            watts >= FAST_THRESHOLD_WATTS -> "Fast"
+            watts >= NORMAL_THRESHOLD_WATTS -> "Normal"
+            watts > 0f -> "Slow"
+            else -> null
+        }
+    }
+
+    private fun chargingTierFromCurrent(currentMilliAmps: Float): String? {
+        return when {
+            currentMilliAmps >= SUPER_FAST_THRESHOLD_MILLI_AMPS -> "Super Fast"
+            currentMilliAmps >= ULTRA_FAST_THRESHOLD_MILLI_AMPS -> "Ultra Fast"
+            currentMilliAmps >= FAST_THRESHOLD_MILLI_AMPS -> "Fast"
+            currentMilliAmps >= NORMAL_THRESHOLD_MILLI_AMPS -> "Normal"
+            currentMilliAmps > 0f -> "Slow"
+            else -> null
         }
     }
 
@@ -447,15 +468,21 @@ class BatteryRepositoryImpl @Inject constructor(
     }
 
     private fun inferSeriesCellCount(snapshot: BatterySnapshot): Int {
-        val cellVoltageMillivolts = snapshot.voltageMillivolts?.takeIf { it > 0 } ?: return 1
+        return inferSeriesCellCountFromEnergy(snapshot)
+            ?: snapshot.seriesCellCountHint?.coerceIn(1, MAX_SERIES_CELL_COUNT)
+            ?: 1
+    }
+
+    private fun inferSeriesCellCountFromEnergy(snapshot: BatterySnapshot): Int? {
+        val cellVoltageMillivolts = snapshot.voltageMillivolts?.takeIf { it > 0 } ?: return null
         // Energy(nWh) / Charge(µAh) = nominal pack voltage in mV (Wh/Ah = V). Dividing by the
         // reported per-cell voltage reveals how many cells are wired in series: ~1 on single-cell
         // phones, ~2 on dual-cell VOOC/SuperVOOC packs (e.g. OPPO Find X-series) that expose
         // per-cell voltage_now. Rounding absorbs the instantaneous-vs-nominal voltage gap since
-        // cell counts are integer-spaced. Falls back to a single cell when the energy or charge
-        // counter is unavailable (some OEM ROMs hide them).
-        val energyNanoWattHours = snapshot.energyNanoWattHours?.takeIf { it > 0 } ?: return 1
-        val chargeMicroAmpHours = snapshot.chargeCounterMicroAmpHours?.takeIf { it > 0 } ?: return 1
+        // cell counts are integer-spaced. Returns null when the energy or charge counter is
+        // unavailable (many OEM ROMs hide them) so a capacity-ratio hint can be used instead.
+        val energyNanoWattHours = snapshot.energyNanoWattHours?.takeIf { it > 0 } ?: return null
+        val chargeMicroAmpHours = snapshot.chargeCounterMicroAmpHours?.takeIf { it > 0 } ?: return null
 
         val packVoltageMillivolts = energyNanoWattHours.toDouble() / chargeMicroAmpHours.toDouble()
         return (packVoltageMillivolts / cellVoltageMillivolts.toDouble())
@@ -593,7 +620,14 @@ class BatteryRepositoryImpl @Inject constructor(
         private const val NORMAL_THRESHOLD_MILLI_AMPS = 1_000f
         private const val FAST_THRESHOLD_MILLI_AMPS = 2_500f
         private const val ULTRA_FAST_THRESHOLD_MILLI_AMPS = 4_500f
-        private const val SUPER_VOOC_ESTIMATE_THRESHOLD_MILLI_AMPS = 6_000f
+        private const val SUPER_FAST_THRESHOLD_MILLI_AMPS = 6_000f
+        // Power tiers (watts) used when the real pack wattage is known. Preferred over the current
+        // tiers because they are brand-neutral and hold for dual-cell packs whose battery-side
+        // current is ~half of a single-cell phone at the same charging power.
+        private const val NORMAL_THRESHOLD_WATTS = 5f
+        private const val FAST_THRESHOLD_WATTS = 15f
+        private const val ULTRA_FAST_THRESHOLD_WATTS = 25f
+        private const val SUPER_FAST_THRESHOLD_WATTS = 45f
         // Upper bound for inferred series cells; phone packs are 1S or 2S, 4 leaves headroom while
         // rejecting garbage energy/charge ratios.
         private const val MAX_SERIES_CELL_COUNT = 4

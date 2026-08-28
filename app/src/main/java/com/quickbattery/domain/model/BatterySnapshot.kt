@@ -16,6 +16,9 @@ data class BatterySnapshot(
     val averageCurrentMicroAmps: Int?,
     val energyNanoWattHours: Long?,
     val chargeCounterMicroAmpHours: Int?,
+    // Best-effort series cell count derived from sysfs capacity nodes when the energy counter is
+    // absent (e.g. dual-cell OPPO/OnePlus SuperVOOC packs that hide BATTERY_PROPERTY_ENERGY_COUNTER).
+    val seriesCellCountHint: Int?,
     val chargeCycles: Int?,
     val batterySaverEnabled: Boolean,
     val timestampMillis: Long,

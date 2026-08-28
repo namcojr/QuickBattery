@@ -20,6 +20,7 @@ import java.io.ByteArrayOutputStream
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.math.abs
+import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import com.quickbattery.domain.model.BatteryHealth
@@ -89,6 +90,7 @@ class AndroidBatteryDataProvider @Inject constructor(
             ),
             energyNanoWattHours = getLongBatteryProperty(BatteryManager.BATTERY_PROPERTY_ENERGY_COUNTER),
             chargeCounterMicroAmpHours = getIntBatteryProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER),
+            seriesCellCountHint = inferSeriesCellCountFromCapacity(),
             chargeCycles = getCycleCount(batteryIntent),
             batterySaverEnabled = powerManager?.isPowerSaveMode == true,
             timestampMillis = System.currentTimeMillis(),
@@ -420,6 +422,37 @@ class AndroidBatteryDataProvider @Inject constructor(
         return null
     }
 
+    // Series cell count inferred from the ratio between the framework "battery" pack capacity and a
+    // vendor fuel-gauge's per-cell capacity. Dual-cell SuperVOOC/Warp packs (OPPO/OnePlus/realme)
+    // market the doubled figure at the framework node (e.g. 7500 mAh) while the gauge exposes the
+    // real single-cell capacity (~3760 mAh); the ~2:1 ratio reveals the 2S wiring even when
+    // BATTERY_PROPERTY_ENERGY_COUNTER is unavailable. Best-effort; returns null when unreadable.
+    private fun inferSeriesCellCountFromCapacity(): Int? {
+        val packCapacityMicroAmpHours = readFirstReadableCapacityMicroAmpHours(PACK_CAPACITY_SYSFS_PATHS)
+            ?: return null
+        val cellCapacityMicroAmpHours = readFirstReadableCapacityMicroAmpHours(CELL_CAPACITY_SYSFS_PATHS)
+            ?: return null
+
+        return (packCapacityMicroAmpHours.toDouble() / cellCapacityMicroAmpHours.toDouble())
+            .roundToInt()
+            .takeIf { it >= 1 }
+            ?.coerceAtMost(MAX_SERIES_CELL_COUNT)
+    }
+
+    private fun readFirstReadableCapacityMicroAmpHours(paths: List<String>): Long? {
+        paths.forEach { path ->
+            val value = runCatching {
+                val file = java.io.File(path)
+                if (!file.canRead()) return@runCatching null
+                file.readText().trim().toLongOrNull()
+            }.getOrNull()
+            if (value != null && value >= MIN_PLAUSIBLE_CELL_CAPACITY_MICRO_AMP_HOURS) {
+                return value
+            }
+        }
+        return null
+    }
+
     private fun getStateOfHealthPercent(): Int? {
         // Primary (Android 14+): BatteryManager.BATTERY_PROPERTY_STATE_OF_HEALTH returns the real
         // state of health as a percentage. The constant isn't in older compile SDKs, so resolve its
@@ -723,6 +756,26 @@ class AndroidBatteryDataProvider @Inject constructor(
         private val STATE_OF_HEALTH_SYSFS_PATHS = listOf(
             "/sys/class/power_supply/battery/state_of_health",
             "/sys/class/power_supply/bms/state_of_health",
+        )
+
+        // Upper bound for inferred series cells; phone packs are 1S or 2S, 4 leaves headroom.
+        private const val MAX_SERIES_CELL_COUNT = 4
+        // Reject non-capacity payloads (e.g. 0 or percentage nodes) below ~1000 mAh in microamp-hours.
+        private const val MIN_PLAUSIBLE_CELL_CAPACITY_MICRO_AMP_HOURS = 1_000_000L
+
+        // Framework "battery" node reports the marketed pack capacity, which is doubled on dual-cell
+        // SuperVOOC/Warp packs; prefer the design figure, falling back to the learned full capacity.
+        private val PACK_CAPACITY_SYSFS_PATHS = listOf(
+            "/sys/class/power_supply/battery/charge_full_design",
+            "/sys/class/power_supply/battery/charge_full",
+        )
+
+        // Vendor fuel-gauge nodes exposing the real per-cell capacity used to derive the 2S ratio.
+        private val CELL_CAPACITY_SYSFS_PATHS = listOf(
+            "/sys/class/power_supply/mtk-battery/charge_full_design",
+            "/sys/class/power_supply/mtk-battery/charge_full",
+            "/sys/class/power_supply/bms/charge_full_design",
+            "/sys/class/power_supply/bms/charge_full",
         )
 
         private val dischargingUsageEventType: Int? by lazy {
