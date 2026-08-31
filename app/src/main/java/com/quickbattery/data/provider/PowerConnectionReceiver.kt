@@ -5,9 +5,10 @@ import android.content.Context
 import android.content.Intent
 
 /**
- * Manifest-declared backup for power connect/disconnect events. The always-on
- * [BatteryMonitorService] is the primary observer; this receiver adds redundancy in case the
- * service is momentarily not running (e.g. right after an OEM kill, before it is restarted).
+ * Manifest-declared observer for power connect/disconnect events. These broadcasts are exempt from
+ * Android's implicit-broadcast restrictions, so they still wake this receiver in the background even
+ * with no service running. It records the charge/discharge boundary and lets the process go back to
+ * sleep; everything else is recomputed the next time the app is opened.
  */
 class PowerConnectionReceiver : BroadcastReceiver() {
     override fun onReceive(
@@ -19,7 +20,5 @@ class PowerConnectionReceiver : BroadcastReceiver() {
             Intent.ACTION_POWER_CONNECTED -> BatteryEventRecorder.onPowerConnected(context, now)
             Intent.ACTION_POWER_DISCONNECTED -> BatteryEventRecorder.onPowerDisconnected(context, now)
         }
-        // Ensure the monitor is running again as soon as any power event is observed.
-        BatteryMonitorService.start(context)
     }
 }

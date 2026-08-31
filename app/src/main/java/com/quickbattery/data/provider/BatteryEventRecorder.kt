@@ -9,9 +9,8 @@ import com.quickbattery.domain.model.BatteryStatus
 /**
  * Single source of truth for turning raw battery broadcasts into persisted state.
  *
- * Both the always-on [BatteryMonitorService] and the manifest-declared
- * [PowerConnectionReceiver] funnel their events through here so charge/discharge
- * boundaries are recorded identically regardless of which component observed them.
+ * The manifest-declared [PowerConnectionReceiver] funnels charge/discharge boundary events through
+ * here so they are recorded consistently whenever the charger is connected or disconnected.
  */
 internal object BatteryEventRecorder {
 
@@ -29,32 +28,6 @@ internal object BatteryEventRecorder {
     ) {
         BatterySessionStore.markPowerDisconnected(context, timestampMillis)
         recordBoundarySample(context, timestampMillis, BatteryStatus.Discharging)
-    }
-
-    /**
-     * Handles an [Intent.ACTION_BATTERY_CHANGED] broadcast. Keeps the session store and level
-     * history continuously fed while the monitor service is alive, so "time since last charge"
-     * and the discharge-trend regression stay accurate even if the app UI is never opened.
-     */
-    fun onBatteryChanged(
-        context: Context,
-        batteryIntent: Intent?,
-        timestampMillis: Long = System.currentTimeMillis(),
-    ) {
-        val status = readStatus(batteryIntent) ?: return
-        val levelPercent = readLevelPercent(batteryIntent) ?: return
-
-        BatterySessionStore.updateFromSnapshot(
-            context = context,
-            status = status,
-            timestampMillis = timestampMillis,
-        )
-        BatteryLevelHistoryStore.appendSampleIfChanged(
-            context = context,
-            timestampMillis = timestampMillis,
-            levelPercent = levelPercent,
-            status = status,
-        )
     }
 
     private fun recordBoundarySample(

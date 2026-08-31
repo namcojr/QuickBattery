@@ -1,19 +1,15 @@
 package com.quickbattery
 
-import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.fillMaxSize
@@ -25,12 +21,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.quickbattery.data.provider.BatteryMonitorService
 import com.quickbattery.ui.BatteryDashboardScreen
 import com.quickbattery.ui.BatteryViewModel
 import com.quickbattery.ui.lifetime.BatteryLifetimeScreen
@@ -42,13 +36,6 @@ import dagger.hilt.android.AndroidEntryPoint
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
-
-    private val requestNotificationPermission =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) {
-            // The monitor service runs regardless; the notification is simply hidden if denied.
-            BatteryMonitorService.start(this)
-            maybePromptBatteryOptimization()
-        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -76,26 +63,17 @@ class MainActivity : ComponentActivity() {
         startActivity(intent)
     }
 
-    // Guarantees the always-on monitor is running whenever the app is opened and, on Android 13+,
-    // requests the notification permission the foreground service needs to surface its status.
+    // Charge/discharge boundaries are captured by the manifest PowerConnectionReceiver in the
+    // background; opening the app just recomputes everything else. The only thing worth doing here
+    // is asking (once) for a battery-optimization exemption so aggressive OEMs don't suppress those
+    // power broadcasts.
     private fun ensureMonitoring() {
-        BatteryMonitorService.start(this)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val granted = ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.POST_NOTIFICATIONS,
-            ) == PackageManager.PERMISSION_GRANTED
-            if (!granted) {
-                requestNotificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
-                return
-            }
-        }
         maybePromptBatteryOptimization()
     }
 
-    // OEM battery optimization can freeze the monitor service and drop battery broadcasts, which is
-    // the root cause of "time since last charge" stalling in the background. Prompt the user once to
-    // exempt the app so the service survives. Guarded by a flag so it never nags on later launches.
+    // OEM battery optimization can freeze the app and drop battery broadcasts / defer the sampler,
+    // which is the root cause of "time since last charge" stalling in the background. Prompt the
+    // user once to exempt the app. Guarded by a flag so it never nags on later launches.
     @SuppressLint("BatteryLife")
     private fun maybePromptBatteryOptimization() {
         val powerManager = getSystemService(PowerManager::class.java) ?: return
