@@ -6,3 +6,4 @@
 **/build/
 **/generated/
 captures/
+keystore.properties

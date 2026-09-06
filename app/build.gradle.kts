@@ -6,6 +6,8 @@ plugins {
     id("com.google.dagger.hilt.android")
 }
 
+import java.util.Properties
+
 android {
     namespace = "com.quickbattery"
     compileSdk = 35
@@ -30,6 +32,20 @@ android {
         }
     }
 
+    signingConfigs {
+        val keystoreProperties = Properties()
+        file("../keystore.properties").takeIf { it.exists() }?.let {
+            keystoreProperties.load(it.reader())
+        }
+
+        create("release") {
+            storeFile = file(keystoreProperties.getProperty("QUICKBATTERY_KEYSTORE_PATH", "/home/namco/.keystores/home-release.jks"))
+            storePassword = keystoreProperties.getProperty("KEYSTORE_PASSWORD")
+            keyAlias = keystoreProperties.getProperty("QUICKBATTERY_KEY_ALIAS", "QuickBattery")
+            keyPassword = keystoreProperties.getProperty("KEY_PASSWORD")
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -37,6 +53,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
+            signingConfig = signingConfigs.getByName("release")
         }
     }
 
