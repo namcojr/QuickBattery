@@ -10,9 +10,12 @@ import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
+import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.fillMaxSize
@@ -24,6 +27,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
@@ -34,6 +38,7 @@ import com.quickbattery.data.provider.MonitorWatchdog
 import com.quickbattery.ui.BatteryDashboardScreen
 import com.quickbattery.ui.BatteryViewModel
 import com.quickbattery.ui.lifetime.BatteryLifetimeScreen
+import com.quickbattery.ui.lifetime.DiagnosticsViewModel
 import com.quickbattery.ui.lifetime.LifetimeViewModel
 import com.quickbattery.ui.lifetime.PurchaseDatePickerDialog
 import com.quickbattery.ui.theme.QuickBatteryTheme
@@ -140,9 +145,23 @@ private fun QuickBatteryApp(
 ) {
     val batteryViewModel: BatteryViewModel = hiltViewModel()
     val lifetimeViewModel: LifetimeViewModel = hiltViewModel()
+    val diagnosticsViewModel: DiagnosticsViewModel = hiltViewModel()
 
     val batteryState by batteryViewModel.uiState.collectAsStateWithLifecycle()
     val lifetimeState by lifetimeViewModel.uiState.collectAsStateWithLifecycle()
+    val loggingEnabled by diagnosticsViewModel.loggingEnabled.collectAsStateWithLifecycle()
+
+    val context = LocalContext.current
+    val exportLogsLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip"),
+        diagnosticsViewModel::exportLogs,
+    )
+
+    LaunchedEffect(Unit) {
+        diagnosticsViewModel.messages.collect { message ->
+            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+        }
+    }
 
     var currentScreen by remember { mutableStateOf(Screen.Dashboard) }
     var showDatePicker by remember { mutableStateOf(false) }
@@ -202,6 +221,21 @@ private fun QuickBatteryApp(
                 onResetCalculationData = {
                     lifetimeViewModel.resetCalculationData()
                     batteryViewModel.refresh()
+                },
+                loggingEnabled = loggingEnabled,
+                onLoggingClick = {
+                    if (loggingEnabled) {
+                        exportLogsLauncher.launch(diagnosticsViewModel.suggestedExportFileName())
+                    } else {
+                        Toast.makeText(context, "Long-press to enable logging", Toast.LENGTH_SHORT).show()
+                    }
+                },
+                onLoggingLongClick = {
+                    if (loggingEnabled) {
+                        diagnosticsViewModel.discardLogging()
+                    } else {
+                        diagnosticsViewModel.enableLogging()
+                    }
                 },
             )
         }

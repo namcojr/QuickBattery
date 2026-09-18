@@ -7,13 +7,20 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -26,6 +33,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -33,6 +41,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -43,8 +52,11 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.quickbattery.domain.model.BatteryHealthUi
 import com.quickbattery.domain.model.ChargingHabitsUi
@@ -65,6 +77,9 @@ fun BatteryLifetimeScreen(
     onToggleTheme: () -> Unit,
     onEditPurchaseDate: () -> Unit,
     onResetCalculationData: () -> Unit,
+    loggingEnabled: Boolean,
+    onLoggingClick: () -> Unit,
+    onLoggingLongClick: () -> Unit,
 ) {
     Scaffold(
         topBar = {
@@ -101,6 +116,9 @@ fun BatteryLifetimeScreen(
                     onToggleTheme = onToggleTheme,
                     onEditPurchaseDate = onEditPurchaseDate,
                     onResetCalculationData = onResetCalculationData,
+                    loggingEnabled = loggingEnabled,
+                    onLoggingClick = onLoggingClick,
+                    onLoggingLongClick = onLoggingLongClick,
                 )
             }
         }
@@ -114,6 +132,9 @@ private fun LifetimeContent(
     onToggleTheme: () -> Unit,
     onEditPurchaseDate: () -> Unit,
     onResetCalculationData: () -> Unit,
+    loggingEnabled: Boolean,
+    onLoggingClick: () -> Unit,
+    onLoggingLongClick: () -> Unit,
 ) {
     // Rotate the data-derived facts on every load without altering the deterministic calculation.
     val rotatedFacts = remember(statistics) { statistics.facts.shuffled() }
@@ -136,31 +157,128 @@ private fun LifetimeContent(
         item { FactsCard(rotatedFacts) }
         item { TimelineCard(statistics.timeline) }
         item {
-            OutlinedButton(
-                onClick = onToggleTheme,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Change Theme")
-            }
-        }
-        item {
-            Button(
-                onClick = onEditPurchaseDate,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Edit Purchase Date")
-            }
-        }
-        item {
-            OutlinedButton(
-                onClick = onResetCalculationData,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Reset Calculation Data")
-            }
+            SettingsButtons(
+                loggingEnabled = loggingEnabled,
+                onToggleTheme = onToggleTheme,
+                onEditPurchaseDate = onEditPurchaseDate,
+                onResetCalculationData = onResetCalculationData,
+                onLoggingClick = onLoggingClick,
+                onLoggingLongClick = onLoggingLongClick,
+            )
         }
     }
 }
+
+@Composable
+private fun SettingsButtons(
+    loggingEnabled: Boolean,
+    onToggleTheme: () -> Unit,
+    onEditPurchaseDate: () -> Unit,
+    onResetCalculationData: () -> Unit,
+    onLoggingClick: () -> Unit,
+    onLoggingLongClick: () -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(SETTINGS_GRID_SPACING)) {
+        SettingsButtonRow {
+            OutlinedButton(
+                onClick = onToggleTheme,
+                modifier = settingsCell(),
+                contentPadding = SETTINGS_BUTTON_PADDING,
+            ) {
+                SettingsButtonLabel("Change Theme")
+            }
+            Button(
+                onClick = onEditPurchaseDate,
+                modifier = settingsCell(),
+                contentPadding = SETTINGS_BUTTON_PADDING,
+            ) {
+                SettingsButtonLabel("Edit Purchase Date")
+            }
+        }
+        SettingsButtonRow {
+            OutlinedButton(
+                onClick = onResetCalculationData,
+                modifier = settingsCell(),
+                contentPadding = SETTINGS_BUTTON_PADDING,
+            ) {
+                SettingsButtonLabel("Reset Calculation Data")
+            }
+            LoggingButton(
+                loggingEnabled = loggingEnabled,
+                onClick = onLoggingClick,
+                onLongClick = onLoggingLongClick,
+                modifier = settingsCell(),
+            )
+        }
+    }
+}
+
+// Both cells of a row share the height of the taller one, so a wrapped label never leaves its
+// neighbour looking shorter.
+@Composable
+private fun SettingsButtonRow(content: @Composable RowScope.() -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(IntrinsicSize.Min),
+        horizontalArrangement = Arrangement.spacedBy(SETTINGS_GRID_SPACING),
+        content = content,
+    )
+}
+
+private fun RowScope.settingsCell(): Modifier = Modifier.weight(1f).fillMaxHeight()
+
+@Composable
+private fun SettingsButtonLabel(text: String) {
+    Text(text = text, textAlign = TextAlign.Center)
+}
+
+/**
+ * Material buttons have no long-press, so this one is drawn by hand to match OutlinedButton while
+ * idle, and fills in while a capture is running. Long-press arms or discards logging; a tap
+ * exports once armed.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun LoggingButton(
+    loggingEnabled: Boolean,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val shape = ButtonDefaults.outlinedShape
+    val colors = MaterialTheme.colorScheme
+    Surface(
+        shape = shape,
+        color = if (loggingEnabled) colors.tertiaryContainer else Color.Transparent,
+        contentColor = if (loggingEnabled) colors.onTertiaryContainer else colors.primary,
+        border = if (loggingEnabled) null else BorderStroke(1.dp, colors.outline),
+        modifier = modifier
+            .defaultMinSize(minHeight = ButtonDefaults.MinHeight)
+            .clip(shape)
+            .combinedClickable(
+                role = Role.Button,
+                onClickLabel = if (loggingEnabled) "Export logs" else null,
+                onLongClickLabel = if (loggingEnabled) "Disable logging" else "Enable logging",
+                onClick = onClick,
+                onLongClick = onLongClick,
+            ),
+    ) {
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier.padding(SETTINGS_BUTTON_PADDING),
+        ) {
+            Text(
+                text = if (loggingEnabled) "Export logs" else "Enable logging",
+                style = MaterialTheme.typography.labelLarge,
+                textAlign = TextAlign.Center,
+            )
+        }
+    }
+}
+
+private val SETTINGS_GRID_SPACING = 8.dp
+private val SETTINGS_BUTTON_PADDING = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
 
 @Composable
 private fun PhoneAgeCard(phoneAge: PhoneAgeUi) {

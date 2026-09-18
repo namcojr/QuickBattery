@@ -19,7 +19,6 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.ByteArrayOutputStream
 import javax.inject.Inject
 import javax.inject.Singleton
-import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -58,7 +57,11 @@ class AndroidBatteryDataProvider @Inject constructor(
         val chargingSource = mapChargingSource(batteryPluggedCode)
         val health = mapBatteryHealth(batteryHealthCode)
         val healthPercent = getStateOfHealthPercent()
-        val voltageMillivolts = getVoltageExtraInMilliVolts(batteryIntent)
+        // Recording a sample here guarantees a fresh reading even when the monitor service is
+        // down; while it runs, the meter also has its last few seconds of samples to smooth over.
+        ChargingMeter.sample(context, batteryIntent, source = "snapshot")
+        val meter = ChargingMeter.resolve(context)
+        val voltageMillivolts = meter.cellVoltageMillivolts
         val temperatureCelsius = batteryIntent
             ?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1)
             ?.takeIf { it > 0 }
@@ -76,21 +79,16 @@ class AndroidBatteryDataProvider @Inject constructor(
             voltageMillivolts = voltageMillivolts,
             temperatureCelsius = temperatureCelsius,
             technology = technology,
-            currentMicroAmps = getCurrentBatteryPropertyInMicroAmps(
-                property = BatteryManager.BATTERY_PROPERTY_CURRENT_NOW,
-                status = status,
-                levelPercent = levelPercent,
-                voltageMillivolts = voltageMillivolts,
-            ),
-            averageCurrentMicroAmps = getCurrentBatteryPropertyInMicroAmps(
-                property = BatteryManager.BATTERY_PROPERTY_CURRENT_AVERAGE,
-                status = status,
-                levelPercent = levelPercent,
-                voltageMillivolts = voltageMillivolts,
-            ),
+            currentMicroAmps = meter.currentMicroAmps,
+            averageCurrentMicroAmps = meter.averageCurrentMicroAmps,
+            chargingPowerMilliWatts = meter.chargingPowerMilliWatts,
+            chargingPowerFromCounter = meter.powerSource == ChargingMeter.PowerSource.ChargeCounter,
             energyNanoWattHours = getLongBatteryProperty(BatteryManager.BATTERY_PROPERTY_ENERGY_COUNTER),
-            chargeCounterMicroAmpHours = getIntBatteryProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER),
-            seriesCellCountHint = inferSeriesCellCountFromCapacity(),
+            chargeCounterMicroAmpHours = BatteryRawReader
+                .chargeCounterMicroAmpHours(batteryManager, levelPercent)
+                ?.coerceAtMost(Int.MAX_VALUE.toLong())
+                ?.toInt(),
+            seriesCellCountHint = meter.seriesCellCount ?: inferSeriesCellCountFromCapacity(),
             chargeCycles = getCycleCount(batteryIntent),
             batterySaverEnabled = powerManager?.isPowerSaveMode == true,
             timestampMillis = System.currentTimeMillis(),
@@ -155,6 +153,7 @@ class AndroidBatteryDataProvider @Inject constructor(
         BatteryRecordStore.clear(context)
         BatteryLevelHistoryStore.clear(context)
         BatterySessionStore.clear(context)
+        ChargingMeter.clearCalibration(context)
     }
 
     override suspend fun getRecentBatteryLevelSamples(
@@ -403,34 +402,6 @@ class AndroidBatteryDataProvider @Inject constructor(
         return value.takeUnless { it == Long.MIN_VALUE }
     }
 
-    private fun getVoltageExtraInMilliVolts(intent: Intent?): Int? {
-        // Prefer the fuel-gauge's live voltage node: EXTRA_VOLTAGE is often quantized to coarse
-        // steps (e.g. 4000/3900 mV) on many OEMs, whereas /sys/.../voltage_now exposes the real
-        // instantaneous reading (e.g. 4133 mV). Fall back to the broadcast extra when the node is
-        // unreadable (SELinux-restricted on some devices).
-        readPreciseVoltageMilliVolts()?.let { return it }
-
-        val rawVoltage = intent?.getIntExtra(BatteryManager.EXTRA_VOLTAGE, Int.MIN_VALUE) ?: return null
-        return normalizeVoltageToMilliVolts(rawVoltage)
-    }
-
-    private fun readPreciseVoltageMilliVolts(): Int? {
-        VOLTAGE_NOW_SYSFS_PATHS.forEach { path ->
-            val rawMicroVolts = runCatching {
-                val file = java.io.File(path)
-                if (!file.canRead()) return@runCatching null
-                file.readText().trim().toIntOrNull()
-            }.getOrNull() ?: return@forEach
-
-            // voltage_now is documented in microvolts; some panels report millivolts directly.
-            val normalized = normalizeVoltageToMilliVolts(rawMicroVolts)
-            if (normalized != null && normalized in PLAUSIBLE_VOLTAGE_MILLI_VOLTS_RANGE) {
-                return normalized
-            }
-        }
-        return null
-    }
-
     // Series cell count inferred from the ratio between the framework "battery" pack capacity and a
     // vendor fuel-gauge's per-cell capacity. Dual-cell SuperVOOC/Warp packs (OPPO/OnePlus/realme)
     // market the doubled figure at the framework node (e.g. 7500 mAh) while the gauge exposes the
@@ -484,81 +455,6 @@ class AndroidBatteryDataProvider @Inject constructor(
         return null
     }
 
-
-    private fun normalizeVoltageToMilliVolts(rawVoltage: Int): Int? {
-        if (rawVoltage <= 0) {
-            return null
-        }
-
-        // Android documents EXTRA_VOLTAGE as millivolts, but some OEM builds expose V / dV / cV
-        // or even microvolts. Normalize common variants so UI and power heuristics stay correct.
-        return when {
-            rawVoltage in PLAUSIBLE_VOLTAGE_MILLI_VOLTS_RANGE -> rawVoltage
-            rawVoltage in PLAUSIBLE_VOLTAGE_VOLTS_RANGE -> rawVoltage * MILLI_VOLTS_PER_VOLT
-            rawVoltage in PLAUSIBLE_VOLTAGE_DECI_VOLTS_RANGE -> rawVoltage * MILLI_VOLTS_PER_DECI_VOLT
-            rawVoltage in PLAUSIBLE_VOLTAGE_CENTI_VOLTS_RANGE -> rawVoltage * MILLI_VOLTS_PER_CENTI_VOLT
-            rawVoltage in PLAUSIBLE_VOLTAGE_MICRO_VOLTS_RANGE -> rawVoltage / MICRO_VOLTS_PER_MILLI_VOLT
-            else -> rawVoltage
-        }
-    }
-
-    private fun getCurrentBatteryPropertyInMicroAmps(
-        property: Int,
-        status: BatteryStatus,
-        levelPercent: Int?,
-        voltageMillivolts: Int?,
-    ): Int? {
-        val rawCurrent = getIntBatteryProperty(property) ?: return null
-        return normalizeCurrentToMicroAmps(
-            rawCurrent = rawCurrent,
-            status = status,
-            levelPercent = levelPercent,
-            voltageMillivolts = voltageMillivolts,
-        )
-    }
-
-    private fun normalizeCurrentToMicroAmps(
-        rawCurrent: Int,
-        status: BatteryStatus,
-        levelPercent: Int?,
-        voltageMillivolts: Int?,
-    ): Int {
-        if (!status.isChargingState()) {
-            return rawCurrent
-        }
-
-        val absoluteRawCurrent = abs(rawCurrent)
-        if (absoluteRawCurrent == 0) {
-            return rawCurrent
-        }
-
-        // Android reports battery current in microamps, but some OEM ROMs expose milliamp values.
-        // Detect obvious mA payloads while charging and normalize to microamps.
-        val likelyMilliAmpUnits =
-            absoluteRawCurrent <= MAX_REASONABLE_CHARGING_CURRENT_MILLI_AMPS &&
-                (levelPercent == null || levelPercent < TRICKLE_CHARGE_LEVEL_PERCENT_THRESHOLD) &&
-                isImplausiblyLowChargingPower(
-                    currentAssumingMicroAmps = absoluteRawCurrent,
-                    voltageMillivolts = voltageMillivolts,
-                )
-
-        if (!likelyMilliAmpUnits) {
-            return rawCurrent
-        }
-
-        val normalizedMagnitude = absoluteRawCurrent * MICRO_AMPS_PER_MILLI_AMP
-        return if (rawCurrent < 0) -normalizedMagnitude else normalizedMagnitude
-    }
-
-    private fun isImplausiblyLowChargingPower(
-        currentAssumingMicroAmps: Int,
-        voltageMillivolts: Int?,
-    ): Boolean {
-        val voltage = voltageMillivolts ?: return currentAssumingMicroAmps < MIN_PLAUSIBLE_CHARGING_CURRENT_MICRO_AMPS
-        val chargingPowerMilliWatts =
-            (currentAssumingMicroAmps.toDouble() * voltage.toDouble()) / MICRO_AMPS_MILLIVOLTS_PER_MILLI_WATT
-        return chargingPowerMilliWatts < MIN_PLAUSIBLE_CHARGING_POWER_MILLI_WATTS
-    }
 
     private fun getCycleCount(batteryIntent: Intent?): Int? {
         // Preferred source (Android 14+): the sticky ACTION_BATTERY_CHANGED broadcast exposes the
@@ -728,21 +624,6 @@ class AndroidBatteryDataProvider @Inject constructor(
     private companion object {
         private const val LAST_CHARGE_LOOKBACK_WINDOW_MILLIS = 14L * 24L * 60L * 60L * 1000L
         private const val MAX_HISTORY_TRANSITION_GAP_MILLIS = 20L * 60L * 1000L
-        private const val MILLI_VOLTS_PER_VOLT = 1_000
-        private const val MILLI_VOLTS_PER_DECI_VOLT = 100
-        private const val MILLI_VOLTS_PER_CENTI_VOLT = 10
-        private const val MICRO_VOLTS_PER_MILLI_VOLT = 1_000
-        private const val MICRO_AMPS_PER_MILLI_AMP = 1_000
-        private const val MICRO_AMPS_MILLIVOLTS_PER_MILLI_WATT = 1_000_000.0
-        private const val MAX_REASONABLE_CHARGING_CURRENT_MILLI_AMPS = 20_000
-        private const val TRICKLE_CHARGE_LEVEL_PERCENT_THRESHOLD = 97
-        private const val MIN_PLAUSIBLE_CHARGING_CURRENT_MICRO_AMPS = 50_000
-        private const val MIN_PLAUSIBLE_CHARGING_POWER_MILLI_WATTS = 250.0
-        private val PLAUSIBLE_VOLTAGE_VOLTS_RANGE = 2..20
-        private val PLAUSIBLE_VOLTAGE_DECI_VOLTS_RANGE = 20..200
-        private val PLAUSIBLE_VOLTAGE_CENTI_VOLTS_RANGE = 200..2_000
-        private val PLAUSIBLE_VOLTAGE_MILLI_VOLTS_RANGE = 2_000..20_000
-        private val PLAUSIBLE_VOLTAGE_MICRO_VOLTS_RANGE = 2_000_000..20_000_000
 
         // BatteryManager.EXTRA_CYCLE_COUNT (public since Android 14). Declared as a literal so the
         // extra is still read on capable devices when compiling against older SDKs.
@@ -753,13 +634,6 @@ class AndroidBatteryDataProvider @Inject constructor(
         // running down to minSdk 28 (where these events simply never occur).
         private const val FOREGROUND_SERVICE_START_EVENT = 19
         private const val FOREGROUND_SERVICE_STOP_EVENT = 20
-
-        // Candidate fuel-gauge nodes exposing the precise instantaneous voltage. Read best-effort;
-        // unreadable on SELinux-restricted devices, in which case we fall back to EXTRA_VOLTAGE.
-        private val VOLTAGE_NOW_SYSFS_PATHS = listOf(
-            "/sys/class/power_supply/battery/voltage_now",
-            "/sys/class/power_supply/bms/voltage_now",
-        )
 
         // Best-effort numeric state-of-health nodes used only when the framework property is absent.
         private val STATE_OF_HEALTH_SYSFS_PATHS = listOf(

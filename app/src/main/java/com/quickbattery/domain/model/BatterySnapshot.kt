@@ -14,10 +14,14 @@ data class BatterySnapshot(
     val technology: String?,
     val currentMicroAmps: Int?,
     val averageCurrentMicroAmps: Int?,
+    // Battery-side charging power resolved by the charging meter, when it has enough evidence.
+    val chargingPowerMilliWatts: Int?,
+    // True when that power is a charge-counter average (no live calibration learned yet).
+    val chargingPowerFromCounter: Boolean,
     val energyNanoWattHours: Long?,
     val chargeCounterMicroAmpHours: Int?,
-    // Best-effort series cell count derived from sysfs capacity nodes when the energy counter is
-    // absent (e.g. dual-cell OPPO/OnePlus SuperVOOC packs that hide BATTERY_PROPERTY_ENERGY_COUNTER).
+    // Best-effort series cell count: from a pack-level voltage reading, the learned current
+    // calibration, or sysfs capacity nodes (e.g. dual-cell OPPO/OnePlus SuperVOOC packs).
     val seriesCellCountHint: Int?,
     val chargeCycles: Int?,
     val batterySaverEnabled: Boolean,

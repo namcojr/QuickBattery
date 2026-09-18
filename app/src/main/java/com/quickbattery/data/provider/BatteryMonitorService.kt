@@ -11,6 +11,8 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.os.Handler
+import android.os.HandlerThread
 import android.os.IBinder
 import androidx.core.content.ContextCompat
 import com.quickbattery.MainActivity
@@ -30,6 +32,11 @@ import com.quickbattery.domain.model.BatteryStatus
  * Running here also buys access to [Intent.ACTION_BATTERY_CHANGED], which the platform only ever
  * delivers to runtime-registered receivers. That gives a second, independent way to notice the
  * charger being plugged or unplugged when the dedicated power broadcast goes missing.
+ *
+ * While a charger is attached (or diagnostic logging is on) it also polls the fuel gauge every few
+ * seconds on a background thread, feeding [ChargingMeter] the dense samples it needs to smooth the
+ * live current and calibrate it against the charge counter. Polling stops as soon as neither holds,
+ * so it costs nothing on battery.
  */
 class BatteryMonitorService : Service() {
 
@@ -39,7 +46,10 @@ class BatteryMonitorService : Service() {
             when (intent?.action) {
                 Intent.ACTION_POWER_CONNECTED -> BatteryEventRecorder.onPowerConnected(context, now)
                 Intent.ACTION_POWER_DISCONNECTED -> BatteryEventRecorder.onPowerDisconnected(context, now)
-                Intent.ACTION_BATTERY_CHANGED -> BatteryEventRecorder.onBatteryChanged(context, intent, now)
+                Intent.ACTION_BATTERY_CHANGED -> {
+                    BatteryEventRecorder.onBatteryChanged(context, intent, now)
+                    onBatteryIntent(intent, source = SOURCE_BROADCAST)
+                }
             }
             updateNotification(intent)
         }
@@ -47,8 +57,34 @@ class BatteryMonitorService : Service() {
 
     private var lastNotificationText: String? = null
 
+    private lateinit var samplerThread: HandlerThread
+    private lateinit var samplerHandler: Handler
+
+    @Volatile
+    private var latestBatteryIntent: Intent? = null
+
+    // Only touched on the sampler thread.
+    private var samplerRunning = false
+
+    private val sampleTick = object : Runnable {
+        override fun run() {
+            val context = this@BatteryMonitorService
+            val logging = BatteryDiagnosticsLog.isEnabled(context)
+            val plugged = BatteryEventRecorder.readPlugged(latestBatteryIntent) == true
+            if (!plugged && !logging) {
+                samplerRunning = false
+                return
+            }
+            // The broadcast only carries level/voltage/temperature; everything else is read live.
+            recordSample(latestBatteryIntent, SOURCE_TICK)
+            samplerHandler.postDelayed(this, if (logging) LOGGING_SAMPLE_INTERVAL_MILLIS else CHARGING_SAMPLE_INTERVAL_MILLIS)
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
+        samplerThread = HandlerThread("battery-sampler").apply { start() }
+        samplerHandler = Handler(samplerThread.looper)
         createNotificationChannel()
         startForegroundCompat(buildNotification(statusText = null))
         // Whatever happened while the service was down is repaired before live events resume.
@@ -61,6 +97,8 @@ class BatteryMonitorService : Service() {
         // Re-assert foreground state on redelivery so OEM restarts keep the monitor alive.
         startForegroundCompat(buildNotification(lastNotificationText))
         MonitorWatchdog.schedule(this)
+        // Also the hook for diagnostic logging being switched on: it restarts the service.
+        ensureSampling()
         return START_STICKY
     }
 
@@ -73,6 +111,8 @@ class BatteryMonitorService : Service() {
 
     override fun onDestroy() {
         runCatching { unregisterReceiver(batteryReceiver) }
+        samplerHandler.removeCallbacksAndMessages(null)
+        samplerThread.quitSafely()
         MonitorWatchdog.schedule(this)
         super.onDestroy()
     }
@@ -94,7 +134,35 @@ class BatteryMonitorService : Service() {
             ContextCompat.RECEIVER_NOT_EXPORTED,
         )
         BatteryEventRecorder.onBatteryChanged(this, sticky)
+        onBatteryIntent(sticky, source = SOURCE_BROADCAST)
         updateNotification(sticky)
+    }
+
+    private fun onBatteryIntent(intent: Intent?, source: String) {
+        if (intent == null) return
+        latestBatteryIntent = intent
+        samplerHandler.post {
+            BatteryDiagnosticsLog.recordBroadcast(this, intent)
+            recordSample(intent, source)
+        }
+        ensureSampling()
+    }
+
+    private fun ensureSampling() {
+        samplerHandler.post {
+            if (!samplerRunning) {
+                samplerRunning = true
+                sampleTick.run()
+            }
+        }
+    }
+
+    private fun recordSample(intent: Intent?, source: String) {
+        val batteryIntent = intent ?: BatteryEventRecorder.readBatteryIntent(this)
+        val sample = ChargingMeter.sample(this, batteryIntent, source)
+        if (BatteryDiagnosticsLog.isEnabled(this)) {
+            BatteryDiagnosticsLog.recordSample(this, sample, ChargingMeter.resolve(this))
+        }
     }
 
     private fun updateNotification(batteryIntent: Intent?) {
@@ -170,6 +238,10 @@ class BatteryMonitorService : Service() {
     companion object {
         private const val CHANNEL_ID = "battery_monitor"
         private const val NOTIFICATION_ID = 1001
+        private const val SOURCE_BROADCAST = "broadcast"
+        private const val SOURCE_TICK = "tick"
+        private const val CHARGING_SAMPLE_INTERVAL_MILLIS = 5_000L
+        private const val LOGGING_SAMPLE_INTERVAL_MILLIS = 2_000L
 
         /**
          * Starts the monitor as a foreground service; safe to call repeatedly.

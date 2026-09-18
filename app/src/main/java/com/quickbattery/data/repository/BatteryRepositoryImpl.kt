@@ -388,7 +388,7 @@ class BatteryRepositoryImpl @Inject constructor(
             }
         }
         snapshot.levelPercent?.let { list += BatteryInsight("Capacity", "$it%") }
-        snapshot.voltageMillivolts?.let { list += BatteryInsight("Voltage", "$it mV") }
+        snapshot.voltageMillivolts?.let { list += BatteryInsight("Voltage", formatVoltage(snapshot, it)) }
         snapshot.temperatureCelsius?.let { list += BatteryInsight("Temperature", "${"%.1f".format(it)} C") }
         snapshot.technology?.let { list += BatteryInsight("Technology", it) }
         snapshot.currentMicroAmps?.let { current ->
@@ -410,15 +410,31 @@ class BatteryRepositoryImpl @Inject constructor(
         return list
     }
 
+    // voltageMillivolts is always per cell; on series packs say so, or it reads as half the truth.
+    private fun formatVoltage(snapshot: BatterySnapshot, cellMillivolts: Int): String {
+        val cells = snapshot.seriesCellCountHint?.takeIf { it > 1 } ?: return "$cellMillivolts mV"
+        return "$cellMillivolts mV × $cells cells"
+    }
+
     private fun inferChargingSpeed(snapshot: BatterySnapshot): String? {
         if (!snapshot.status.isChargingState()) {
             return null
         }
+
+        // The charging meter's figure is authoritative: it is calibrated against the charge
+        // counter, so it is right regardless of the register's unit or how many cells the pack has.
+        // A counter-derived figure is a rolling average, flagged with "~".
+        snapshot.chargingPowerMilliWatts?.let { milliWatts ->
+            val watts = milliWatts / 1000f
+            val tier = chargingTierFromWatts(watts) ?: return null
+            val prefix = if (snapshot.chargingPowerFromCounter) "~" else ""
+            return "$tier - $prefix${"%.1f".format(watts)} W"
+        }
+
         val currentMilliAmps = resolveChargingCurrentMilliAmps(snapshot) ?: return null
 
-        // Charging power P(W) = V(volts) x I(amps). Use the real PACK voltage: on multi-cell
-        // (series) packs the fuel gauge's voltage_now reports the per-cell voltage (~4 V), while the
-        // pack is N cells in series, so the true charging voltage is N x that.
+        // Uncalibrated fallback. Charging power P(W) = V(volts) x I(amps), using the PACK voltage:
+        // the snapshot voltage is per cell, while a series pack is N cells, so it is N x that.
         val watts = resolvePackVoltageMillivolts(snapshot)
             ?.takeIf { it > 0 }
             ?.let { (it.toFloat() / 1000f) * (currentMilliAmps / 1000f) }
@@ -490,19 +506,15 @@ class BatteryRepositoryImpl @Inject constructor(
             .coerceIn(1, MAX_SERIES_CELL_COUNT)
     }
 
+    // The live current is already a median of the last few seconds; the gauge's own average is
+    // only a fallback. Taking the larger of the two (as before) systematically overstated power.
     private fun resolveChargingCurrentMilliAmps(snapshot: BatterySnapshot): Float? {
-        val strongestCurrentMicroAmps = listOfNotNull(
-            snapshot.currentMicroAmps,
-            snapshot.averageCurrentMicroAmps,
-        ).map(::abs)
-            .maxOrNull()
+        val currentMicroAmps = (snapshot.currentMicroAmps ?: snapshot.averageCurrentMicroAmps)
+            ?.let(::abs)
+            ?.takeIf { it > 0 }
             ?: return null
 
-        if (strongestCurrentMicroAmps <= 0) {
-            return null
-        }
-
-        return strongestCurrentMicroAmps / 1000f
+        return currentMicroAmps / 1000f
     }
 
     private fun microAmpsToMilliAmps(microAmps: Int): String {
