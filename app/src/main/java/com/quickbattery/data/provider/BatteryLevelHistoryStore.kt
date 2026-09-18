@@ -1,9 +1,9 @@
 package com.quickbattery.data.provider
 
 import android.content.Context
-import com.quickbattery.domain.model.BatterySnapshot
 import com.quickbattery.domain.model.BatteryStatus
 
+@Suppress("ApplySharedPref") // commit() is deliberate; see writeSamples.
 internal object BatteryLevelHistoryStore {
 
     // Guards read-modify-write across concurrent callers (foreground service on the main thread,
@@ -14,28 +14,38 @@ internal object BatteryLevelHistoryStore {
         prefs(context)
             .edit()
             .remove(KEY_LEVEL_SAMPLES)
-            .apply()
+            .commit()
+        Unit
     }
 
-    fun appendSnapshotSample(
+    /**
+     * Periodic sample taken while the app is reading the battery. Keeps a heartbeat in the log even
+     * when nothing changed, which is what the discharge-trend regression needs.
+     *
+     * [status] must already be corrected against the plugged flag by
+     * [BatteryEventRecorder.effectiveStatus]; a raw FULL recorded just after an unplug would read
+     * back as charging evidence and invalidate the session start.
+     */
+    fun appendPeriodicSample(
         context: Context,
-        snapshot: BatterySnapshot,
+        timestampMillis: Long,
+        levelPercent: Int?,
+        status: BatteryStatus,
     ) = synchronized(lock) {
-        val level = snapshot.levelPercent ?: return@synchronized
-        val now = snapshot.timestampMillis
+        val level = levelPercent?.coerceIn(0, 100) ?: return@synchronized
 
         val existing = readSamples(context).toMutableList()
         val last = existing.lastOrNull()
 
         if (last != null) {
-            if (now <= last.timestampMillis) {
+            if (timestampMillis <= last.timestampMillis) {
                 return@synchronized
             }
 
             val unchanged =
                 last.levelPercent == level &&
-                    last.status == snapshot.status &&
-                    now - last.timestampMillis < MIN_SAMPLE_INTERVAL_MILLIS
+                    last.status == status &&
+                    timestampMillis - last.timestampMillis < MIN_SAMPLE_INTERVAL_MILLIS
             if (unchanged) {
                 return@synchronized
             }
@@ -45,9 +55,9 @@ internal object BatteryLevelHistoryStore {
             context = context,
             existing = existing,
             sample = BatteryLevelSample(
-                timestampMillis = now,
+                timestampMillis = timestampMillis,
                 levelPercent = level,
-                status = snapshot.status,
+                status = status,
             ),
         )
     }
@@ -65,8 +75,16 @@ internal object BatteryLevelHistoryStore {
     ) = synchronized(lock) {
         val level = levelPercent.coerceIn(0, 100)
         val existing = readSamples(context).toMutableList()
-        val last = existing.lastOrNull()
-        if (last != null && timestampMillis <= last.timestampMillis) {
+
+        // A boundary sample is never discarded for being out of order. Repair passes replay
+        // events at the timestamp they actually happened, which can predate samples already
+        // written, and that evidence is exactly what reconstructs a missed transition.
+        // appendPruneWrite re-sorts, so an older insert is safe; only an exact duplicate is
+        // skipped.
+        val duplicate = existing.any {
+            it.timestampMillis == timestampMillis && it.levelPercent == level && it.status == status
+        }
+        if (duplicate) {
             return@synchronized
         }
 
@@ -123,8 +141,11 @@ internal object BatteryLevelHistoryStore {
     ) {
         existing += sample
 
-        val cutoff = sample.timestampMillis - HISTORY_RETENTION_MILLIS
-        val pruned = existing
+        // Sort before pruning: a repaired boundary can be inserted out of order, and pruning an
+        // unsorted list would evict the newest samples instead of the oldest.
+        val sorted = existing.sortedBy { it.timestampMillis }
+        val cutoff = sorted.last().timestampMillis - HISTORY_RETENTION_MILLIS
+        val pruned = sorted
             .filter { it.timestampMillis >= cutoff }
             .takeLast(MAX_SAMPLES)
 
@@ -171,10 +192,12 @@ internal object BatteryLevelHistoryStore {
             ).joinToString(separator = FIELD_SEPARATOR)
         }
 
+        // Committed rather than applied: these writes happen while handling a power broadcast,
+        // and an unflushed apply() is lost if the OEM kills the process straight afterwards.
         prefs(context)
             .edit()
             .putString(KEY_LEVEL_SAMPLES, serialized)
-            .apply()
+            .commit()
     }
 
     private fun parseSample(raw: String): BatteryLevelSample? {
@@ -195,7 +218,7 @@ internal object BatteryLevelHistoryStore {
     }
 
     private fun prefs(context: Context) =
-        context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+        context.applicationContext.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
 
     private const val PREFERENCES_NAME = "battery_level_history"
     private const val KEY_LEVEL_SAMPLES = "samples"

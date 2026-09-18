@@ -1,15 +1,30 @@
 package com.quickbattery.data.provider
 
 import android.content.Context
+import android.content.SharedPreferences
 
+@Suppress("ApplySharedPref") // commit() is deliberate; see the write() helper.
 internal object BatteryRecordStore {
+
+    // Records are now written from the power-event path as well as the UI path, so the
+    // read-modify-write of the record and the rolling sample window has to be serialized.
+    private val lock = Any()
+
+    /**
+     * commit() blocks but is durable the moment it returns; apply() is asynchronous and is simply
+     * lost if the OEM freezes or kills the process right after a broadcast is handled. Anything
+     * written while finalizing a session therefore commits.
+     */
+    private fun SharedPreferences.Editor.write(commitImmediately: Boolean) {
+        if (commitImmediately) commit() else apply()
+    }
 
     fun clear(context: Context) {
         prefs(context)
             .edit()
             .remove(KEY_LONGEST_SINCE_LAST_CHARGE_MILLIS)
             .remove(KEY_FULL_RUNTIME_ESTIMATE_SAMPLES)
-            .apply()
+            .commit()
     }
 
     /**
@@ -19,14 +34,15 @@ internal object BatteryRecordStore {
     fun updateAndGetLongestSinceLastCharge(
         context: Context,
         candidateMillis: Long?,
-    ): Long? {
+        commitImmediately: Boolean = false,
+    ): Long? = synchronized(lock) {
         val prefs = prefs(context)
         val existing = prefs.getLong(KEY_LONGEST_SINCE_LAST_CHARGE_MILLIS, -1L).takeIf { it > 0L }
 
         if (candidateMillis != null && candidateMillis > (existing ?: 0L)) {
             prefs.edit()
                 .putLong(KEY_LONGEST_SINCE_LAST_CHARGE_MILLIS, candidateMillis)
-                .apply()
+                .write(commitImmediately)
             return candidateMillis
         }
 
@@ -48,7 +64,8 @@ internal object BatteryRecordStore {
         context: Context,
         candidateMillis: Long?,
         nowMillis: Long = System.currentTimeMillis(),
-    ): Long? {
+        commitImmediately: Boolean = false,
+    ): Long? = synchronized(lock) {
         val prefs = prefs(context)
 
         val stored = parseSamples(prefs.getString(KEY_FULL_RUNTIME_ESTIMATE_SAMPLES, null))
@@ -73,7 +90,7 @@ internal object BatteryRecordStore {
         if (changed) {
             prefs.edit()
                 .putString(KEY_FULL_RUNTIME_ESTIMATE_SAMPLES, serializeSamples(window))
-                .apply()
+                .write(commitImmediately)
         }
 
         return medianMillis(window)
@@ -115,7 +132,7 @@ internal object BatteryRecordStore {
     )
 
     private fun prefs(context: Context) =
-        context.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
+        context.applicationContext.getSharedPreferences(PREFERENCES_NAME, Context.MODE_PRIVATE)
 
     private const val PREFERENCES_NAME = "battery_record_store"
     private const val KEY_LONGEST_SINCE_LAST_CHARGE_MILLIS = "longest_since_last_charge_millis"

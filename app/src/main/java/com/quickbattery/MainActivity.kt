@@ -1,9 +1,12 @@
 package com.quickbattery
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
@@ -21,10 +24,13 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.quickbattery.data.provider.BatteryMonitorService
+import com.quickbattery.data.provider.MonitorWatchdog
 import com.quickbattery.ui.BatteryDashboardScreen
 import com.quickbattery.ui.BatteryViewModel
 import com.quickbattery.ui.lifetime.BatteryLifetimeScreen
@@ -63,12 +69,34 @@ class MainActivity : ComponentActivity() {
         startActivity(intent)
     }
 
-    // Charge/discharge boundaries are captured by the manifest PowerConnectionReceiver in the
-    // background; opening the app just recomputes everything else. The only thing worth doing here
-    // is asking (once) for a battery-optimization exemption so aggressive OEMs don't suppress those
-    // power broadcasts.
+    // Opening the app is the one moment monitoring is guaranteed to be able to recover: the
+    // package is out of the stopped state and a foreground service may be started without
+    // restriction. The repair pass for events missed while frozen is not run here -- the service
+    // runs one as it starts, and every dashboard refresh runs one off the main thread.
     private fun ensureMonitoring() {
+        BatteryMonitorService.start(this)
+        MonitorWatchdog.schedule(this)
+        maybeRequestNotificationPermission()
         maybePromptBatteryOptimization()
+    }
+
+    // The monitor runs as a foreground service, which needs a visible notification from Android 13
+    // on. Without the permission the service still runs, but the user gets no way to see that
+    // monitoring is active -- and OEM task killers treat an invisible service far less kindly.
+    private fun maybeRequestNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            return
+        }
+        val granted = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            return
+        }
+        runCatching {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_POST_NOTIFICATIONS)
+        }
     }
 
     // OEM battery optimization can freeze the app and drop battery broadcasts / defer the sampler,
@@ -101,6 +129,7 @@ class MainActivity : ComponentActivity() {
 
 private const val MONITOR_PREFS = "monitor_prefs"
 private const val KEY_BATTERY_OPT_PROMPTED = "battery_opt_prompted"
+private const val REQUEST_POST_NOTIFICATIONS = 3001
 
 private enum class Screen { Dashboard, Lifetime }
 

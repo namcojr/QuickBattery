@@ -96,14 +96,23 @@ class AndroidBatteryDataProvider @Inject constructor(
             timestampMillis = System.currentTimeMillis(),
         )
 
-        BatterySessionStore.updateFromSnapshot(
+        // Reading the battery is also the moment to repair the session: if a charger event was
+        // missed while the app was frozen, the live plugged state reveals it and the boundary is
+        // reconstructed before any of the figures below are derived from it.
+        BatteryEventRecorder.reconcile(
             context = context,
-            status = snapshot.status,
-            timestampMillis = snapshot.timestampMillis,
+            nowMillis = snapshot.timestampMillis,
         )
-        BatteryLevelHistoryStore.appendSnapshotSample(
+        BatteryLevelHistoryStore.appendPeriodicSample(
             context = context,
-            snapshot = snapshot,
+            timestampMillis = snapshot.timestampMillis,
+            levelPercent = snapshot.levelPercent,
+            // The charger flag overrides the reported status here: a lingering FULL just after an
+            // unplug must not be logged as charging evidence.
+            status = BatteryEventRecorder.effectiveStatus(
+                status = snapshot.status,
+                plugged = batteryPluggedCode > 0,
+            ),
         )
 
         snapshot
