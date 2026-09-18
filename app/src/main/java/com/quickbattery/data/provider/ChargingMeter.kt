@@ -20,7 +20,9 @@ import kotlin.math.roundToLong
  * which the counter climbs is a ground-truth current, and comparing it with the raw register
  * reveals the register's scale factor exactly. That factor is learned once and persisted; from
  * then on every raw reading (charging or not) is converted into capacity-equivalent microamps,
- * for which power is simply I x per-cell voltage.
+ * for which power is simply I x per-cell voltage. The factor is signed, so a ROM that reports
+ * charging current as negative (ColorOS does) is also brought back to Android's convention of
+ * positive while charging.
  *
  * Samples come from the monitor service (every few seconds while plugged in), from every
  * ACTION_BATTERY_CHANGED, and from snapshot reads. The buffer lives in memory only.
@@ -51,7 +53,10 @@ internal object ChargingMeter {
     }
 
     data class Reading(
-        /** Capacity-equivalent current (median of the last few seconds), sign as reported. */
+        /**
+         * Capacity-equivalent current (median of the last few seconds). Positive while charging
+         * once calibrated; sign as reported before that.
+         */
         val currentMicroAmps: Int?,
         val averageCurrentMicroAmps: Int?,
         val cellVoltageMillivolts: Int?,
@@ -209,18 +214,21 @@ internal object ChargingMeter {
 
         val rawInSpan = window
             .filter { it.elapsedMillis in rate.startElapsedMillis..rate.endElapsedMillis }
-            .mapNotNull { it.rawCurrentNow?.let(::abs) }
+            .mapNotNull { it.rawCurrentNow }
         if (rawInSpan.size < MIN_CALIBRATION_RAW_SAMPLES) {
             return
         }
-        val rawMean = rawInSpan.average().takeIf { it > 0.0 } ?: return
+        // Signed mean: the counter is climbing, so a negative mean means the ROM reports charging
+        // current as negative, and the learned factor carries that sign.
+        val rawMean = rawInSpan.average().takeIf { it != 0.0 } ?: return
 
         val ratio = rate.rateMicroAmps / rawMean
-        val candidate = CALIBRATION_CANDIDATES.minBy { abs(ln(ratio / it)) }
-        if (abs(ln(ratio / candidate)) > MAX_CALIBRATION_LOG_ERROR) {
+        val magnitude = CALIBRATION_CANDIDATES.minBy { abs(ln(abs(ratio) / it)) }
+        if (abs(ln(abs(ratio) / magnitude)) > MAX_CALIBRATION_LOG_ERROR) {
             pendingFactor = null
             return
         }
+        val candidate = if (ratio < 0.0) -magnitude else magnitude
 
         if (pendingFactor == candidate) {
             if (calibrationFactor != candidate) {
@@ -284,7 +292,8 @@ internal object ChargingMeter {
 
     private fun seriesCellsFromFactor(factor: Double): Int? {
         // A register reading half the capacity-equivalent current is the real current of a 2S pack.
-        return if (factor == 2.0 || factor == 2_000.0) 2 else null
+        val magnitude = abs(factor)
+        return if (magnitude == 2.0 || magnitude == 2_000.0) 2 else null
     }
 
     private fun medianOf(values: List<Int>): Int? {
@@ -310,7 +319,7 @@ internal object ChargingMeter {
     private fun ensureLoaded(context: Context) {
         if (prefsLoaded) return
         val prefs = prefs(context)
-        calibrationFactor = prefs.getFloat(KEY_FACTOR, 0f).takeIf { it > 0f }?.toDouble()
+        calibrationFactor = prefs.getFloat(KEY_FACTOR, 0f).takeIf { it != 0f }?.toDouble()
         microAmpUnitsConfirmed = prefs.getBoolean(KEY_MICRO_AMPS_CONFIRMED, false)
         prefsLoaded = true
     }

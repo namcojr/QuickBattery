@@ -27,14 +27,21 @@ internal object BatteryRawReader {
     }
 
     /**
-     * Voltage as reported, in millivolts. Prefers the fuel gauge's live voltage node: EXTRA_VOLTAGE
-     * is often quantized to coarse steps on OEM builds, whereas voltage_now carries the real
-     * instantaneous reading. Falls back to the broadcast extra when the node is SELinux-restricted.
+     * Voltage as reported, in millivolts. Prefers the fuel gauge's live voltage node, then precise
+     * vendor extras, and only then EXTRA_VOLTAGE, which OEM builds often quantize: ColorOS reports
+     * it in whole volts ("4"), a ~10% error for power, while carrying the real millivolt figure in
+     * its own `battery_now_voltage_type` extra.
      *
      * This may be a whole-pack figure on series (2S) packs; see [cellVoltageMillivolts].
      */
     fun reportedVoltageMillivolts(intent: Intent?): Int? {
         readPreciseVoltageMillivolts()?.let { return it }
+
+        VENDOR_MILLI_VOLT_EXTRAS.forEach { key ->
+            intent?.getIntExtra(key, Int.MIN_VALUE)
+                ?.takeIf { it in PLAUSIBLE_VOLTAGE_MILLI_VOLTS_RANGE }
+                ?.let { return it }
+        }
 
         val rawVoltage = intent?.getIntExtra(BatteryManager.EXTRA_VOLTAGE, Int.MIN_VALUE) ?: return null
         return normalizeVoltageToMillivolts(rawVoltage)
@@ -126,6 +133,13 @@ internal object BatteryRawReader {
     private val PLAUSIBLE_VOLTAGE_CENTI_VOLTS_RANGE = 200..2_000
     private val PLAUSIBLE_VOLTAGE_MILLI_VOLTS_RANGE = 2_000..20_000
     private val PLAUSIBLE_VOLTAGE_MICRO_VOLTS_RANGE = 2_000_000..20_000_000
+
+    // Vendor battery-broadcast extras carrying the precise voltage in millivolts (OPPO/OnePlus
+    // ColorOS). "min" is the lower cell on dual-cell packs, so "now" is preferred.
+    private val VENDOR_MILLI_VOLT_EXTRAS = listOf(
+        "battery_now_voltage_type",
+        "battery_min_voltage_type",
+    )
 
     private val VOLTAGE_NOW_SYSFS_PATHS = listOf(
         "/sys/class/power_supply/battery/voltage_now",

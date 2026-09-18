@@ -62,6 +62,7 @@ class AndroidBatteryDataProvider @Inject constructor(
         ChargingMeter.sample(context, batteryIntent, source = "snapshot")
         val meter = ChargingMeter.resolve(context)
         val voltageMillivolts = meter.cellVoltageMillivolts
+        val chargerLimit = readChargerLimit(batteryIntent, plugged = batteryPluggedCode > 0)
         val temperatureCelsius = batteryIntent
             ?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1)
             ?.takeIf { it > 0 }
@@ -83,6 +84,8 @@ class AndroidBatteryDataProvider @Inject constructor(
             averageCurrentMicroAmps = meter.averageCurrentMicroAmps,
             chargingPowerMilliWatts = meter.chargingPowerMilliWatts,
             chargingPowerFromCounter = meter.powerSource == ChargingMeter.PowerSource.ChargeCounter,
+            chargerMaxMicroAmps = chargerLimit?.first,
+            chargerMaxMicroVolts = chargerLimit?.second,
             energyNanoWattHours = getLongBatteryProperty(BatteryManager.BATTERY_PROPERTY_ENERGY_COUNTER),
             chargeCounterMicroAmpHours = BatteryRawReader
                 .chargeCounterMicroAmpHours(batteryManager, levelPercent)
@@ -402,6 +405,22 @@ class AndroidBatteryDataProvider @Inject constructor(
         return value.takeUnless { it == Long.MIN_VALUE }
     }
 
+    // The framework's max_charging_current (µA) / max_charging_voltage (µV) extras describe what
+    // the attached charger advertises. Not public API constants, but present on AOSP-based builds.
+    // Values outside a plausible phone-charger envelope are dropped rather than shown.
+    private fun readChargerLimit(intent: Intent?, plugged: Boolean): Pair<Int, Int>? {
+        if (!plugged || intent == null) {
+            return null
+        }
+        val microAmps = intent.getIntExtra(EXTRA_MAX_CHARGING_CURRENT, -1)
+            .takeIf { it in PLAUSIBLE_CHARGER_MICRO_AMPS_RANGE }
+            ?: return null
+        val microVolts = intent.getIntExtra(EXTRA_MAX_CHARGING_VOLTAGE, -1)
+            .takeIf { it in PLAUSIBLE_CHARGER_MICRO_VOLTS_RANGE }
+            ?: return null
+        return microAmps to microVolts
+    }
+
     // Series cell count inferred from the ratio between the framework "battery" pack capacity and a
     // vendor fuel-gauge's per-cell capacity. Dual-cell SuperVOOC/Warp packs (OPPO/OnePlus/realme)
     // market the doubled figure at the framework node (e.g. 7500 mAh) while the gauge exposes the
@@ -628,6 +647,12 @@ class AndroidBatteryDataProvider @Inject constructor(
         // BatteryManager.EXTRA_CYCLE_COUNT (public since Android 14). Declared as a literal so the
         // extra is still read on capable devices when compiling against older SDKs.
         private const val EXTRA_CYCLE_COUNT = "android.os.extra.CYCLE_COUNT"
+
+        // BatteryManager.EXTRA_MAX_CHARGING_CURRENT / _VOLTAGE (@hide in the SDK).
+        private const val EXTRA_MAX_CHARGING_CURRENT = "max_charging_current"
+        private const val EXTRA_MAX_CHARGING_VOLTAGE = "max_charging_voltage"
+        private val PLAUSIBLE_CHARGER_MICRO_AMPS_RANGE = 100_000..20_000_000
+        private val PLAUSIBLE_CHARGER_MICRO_VOLTS_RANGE = 3_000_000..50_000_000
 
         // UsageEvents.Event.FOREGROUND_SERVICE_START / _STOP (API 29+). Declared as literals so the
         // foreground-service intervals are matched on capable devices while still compiling and

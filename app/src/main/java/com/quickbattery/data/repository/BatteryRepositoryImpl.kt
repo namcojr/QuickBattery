@@ -406,6 +406,7 @@ class BatteryRepositoryImpl @Inject constructor(
         }
 
         inferChargingSpeed(snapshot)?.let { list += BatteryInsight("Charging Speed", it) }
+        formatChargerMax(snapshot)?.let { list += BatteryInsight("Charger Max", it) }
 
         return list
     }
@@ -414,6 +415,18 @@ class BatteryRepositoryImpl @Inject constructor(
     private fun formatVoltage(snapshot: BatterySnapshot, cellMillivolts: Int): String {
         val cells = snapshot.seriesCellCountHint?.takeIf { it > 1 } ?: return "$cellMillivolts mV"
         return "$cellMillivolts mV × $cells cells"
+    }
+
+    // What the charger advertises, e.g. "71 W (22 V × 3.2 A)". Charger-side, so it sits above the
+    // battery-side charging speed by conversion losses plus whatever the phone itself draws.
+    private fun formatChargerMax(snapshot: BatterySnapshot): String? {
+        val microAmps = snapshot.chargerMaxMicroAmps ?: return null
+        val microVolts = snapshot.chargerMaxMicroVolts ?: return null
+        val volts = microVolts / 1_000_000.0
+        val amps = microAmps / 1_000_000.0
+        // Chargers advertise whole volts almost always; only show a decimal when there is one.
+        val voltsLabel = if (volts % 1.0 == 0.0) "%.0f".format(volts) else "%.1f".format(volts)
+        return "%.0f W (%s V × %.1f A)".format(volts * amps, voltsLabel, amps)
     }
 
     private fun inferChargingSpeed(snapshot: BatterySnapshot): String? {

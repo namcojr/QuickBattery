@@ -18,6 +18,10 @@ data class BatterySnapshot(
     val chargingPowerMilliWatts: Int?,
     // True when that power is a charge-counter average (no live calibration learned yet).
     val chargingPowerFromCounter: Boolean,
+    // Maximum the attached charger advertises (framework max_charging_* extras), when plugged in.
+    // Charger-side, so it is naturally higher than the battery-side charging power.
+    val chargerMaxMicroAmps: Int?,
+    val chargerMaxMicroVolts: Int?,
     val energyNanoWattHours: Long?,
     val chargeCounterMicroAmpHours: Int?,
     // Best-effort series cell count: from a pack-level voltage reading, the learned current
